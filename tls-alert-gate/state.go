@@ -20,6 +20,7 @@ type sourceMemory struct {
 	mu                        sync.Mutex
 	node, path, blackholePath string
 	sources, released         map[string]int64
+	dirty                     bool
 }
 
 func loadSources(node, path, bhpath string) (*sourceMemory, error) {
@@ -91,6 +92,12 @@ func (m *sourceMemory) refreshReleased() error {
 	if v.Node != m.node || len(v.Released) > 65536 || len(v.TLS) > 65536 {
 		return errors.New("invalid blackhole release state")
 	}
+	for ip, first := range v.TLS {
+		addr, err := netip.ParseAddr(ip)
+		if err != nil || addr.Unmap().String() != ip || first <= 0 || first > time.Now().Unix()+5 {
+			return errors.New("invalid migrated TLS source")
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.released = v.Released
@@ -99,10 +106,6 @@ func (m *sourceMemory) refreshReleased() error {
 	}
 	changed := false
 	for ip, first := range v.TLS {
-		addr, err := netip.ParseAddr(ip)
-		if err != nil || addr.Unmap().String() != ip || first <= 0 || first > time.Now().Unix()+5 {
-			return errors.New("invalid migrated TLS source")
-		}
 		if first <= m.released[ip] || first <= m.sources[ip] {
 			continue
 		}
@@ -110,10 +113,11 @@ func (m *sourceMemory) refreshReleased() error {
 			return errors.New("migrated TLS source capacity")
 		}
 		m.sources[ip] = first
+		m.dirty = true
 		changed = true
 	}
 	if changed {
-		return privateWrite(m.path, sourceState{Version: 1, Node: m.node, Sources: m.sources})
+		return m.persistLocked()
 	}
 	return nil
 }
@@ -121,7 +125,24 @@ func (m *sourceMemory) refreshReleased() error {
 func (m *sourceMemory) ensureFile() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return privateWrite(m.path, sourceState{Version: 1, Node: m.node, Sources: m.sources})
+	return m.persistLocked()
+}
+
+// The caller holds m.mu. A failed durable write remains eligible for retry
+// even when no further scanner reaches the gate after storage recovers.
+func (m *sourceMemory) persistLocked() error {
+	err := privateWrite(m.path, sourceState{Version: 1, Node: m.node, Sources: m.sources})
+	m.dirty = err != nil
+	return err
+}
+
+func (m *sourceMemory) retryPersistence() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.dirty {
+		return nil
+	}
+	return m.persistLocked()
 }
 func (m *sourceMemory) contains(ip string) bool {
 	m.mu.Lock()
@@ -181,7 +202,15 @@ func privateWrite(path string, value any) error {
 	if e = f.Close(); e != nil {
 		return e
 	}
-	return os.Rename(name, path)
+	if e = os.Rename(name, path); e != nil {
+		return e
+	}
+	directory, e := os.Open(dir)
+	if e != nil {
+		return e
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 func (m *sourceMemory) remember(ip string) (bool, error) {
 	m.mu.Lock()
@@ -199,5 +228,5 @@ func (m *sourceMemory) remember(ip string) (bool, error) {
 	m.sources[ip] = now
 	// The classification remains in memory if persistence fails; it must never
 	// turn into forwarding this same source to the VPN backend on a disk error.
-	return true, privateWrite(m.path, sourceState{Version: 1, Node: m.node, Sources: m.sources})
+	return true, m.persistLocked()
 }

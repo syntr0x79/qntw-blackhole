@@ -100,7 +100,7 @@ for _ in $(seq 1 40);do [[ -f "$work/old-ready" ]]&&break;sleep .05;done
 [[ -f "$work/old-ready" ]]
 "$stage/routing.sh" check "$work/config.json"
 "$stage/routing.sh" apply "$work/config.json"
-jq -e '.version==1 and .routing_table=="qntw_tls_gate" and .listener_port==14443' "$QNTW_TLS_GATE_READY" >/dev/null
+jq -e '.version==2 and .routing_table=="qntw_tls_gate" and .listener_port==14443 and .interface=="qgate0" and (.local_ips|length)==2' "$QNTW_TLS_GATE_READY" >/dev/null
 # Old connection must keep going directly to the original server.
 touch "$work/old-go1"
 for _ in $(seq 1 40);do [[ -f "$work/old-done1" ]]&&break;sleep .05;done

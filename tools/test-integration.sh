@@ -58,6 +58,10 @@ export XDG_CONFIG_HOME="$work/decoder-home/config" XDG_CACHE_HOME="$work/decoder
 export OPENSSL_CONF=/dev/null PYTHONDONTWRITEBYTECODE=1 LC_ALL=C
 export QNTW_PROBE_BLACKHOLE_STATE="$work/no-persistent-state.json"
 
+ip link set lo up
+printf '\n%s\n' 'Checking Python evidence parsing and real Linux sender credentials'
+python3 -m unittest discover -s "$repo/observability" -p 'test_*.py'
+
 stage=$work/stage
 mkdir -p "$stage"
 ruby "$repo/probe-blackhole/build-profiles.rb" "$repo/probe-blackhole/profiles.json" "$stage"

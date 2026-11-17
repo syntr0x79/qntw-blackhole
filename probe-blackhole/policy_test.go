@@ -30,8 +30,8 @@ func TestPortSweeps(t *testing.T) {
 			for i := 0; i < tc.count; i++ {
 				syn(e, "8.8.8.8", 10000+i, 100000+int64(i*tc.spacing), "0x0002")
 			}
-			if (e.Bans > 0) != tc.want {
-				t.Fatalf("bans=%d", e.Bans)
+			if (e.SYNObservations > 0) != tc.want || e.Bans != 0 {
+				t.Fatalf("observations=%d bans=%d", e.SYNObservations, e.Bans)
 			}
 		})
 	}
@@ -89,8 +89,8 @@ func TestLegitimateAndRetransmits(t *testing.T) {
 		for i := 0; i < 8; i++ {
 			syn(e, "8.8.8.8", 10000+i, 100000, "0x00c2")
 		}
-		if e.Bans != 1 {
-			t.Fatal("ECN SYN missed")
+		if e.SYNObservations != 1 || e.Bans != 0 {
+			t.Fatal("ECN SYN observation missed or unproved source banned")
 		}
 	})
 }
@@ -167,7 +167,7 @@ func TestHTTPAndSSHStillWork(t *testing.T) {
 	}
 	e = fixture()
 	for i := 0; i < 8; i++ {
-		data, _ := json.Marshal(event{Event: "service", Node: "test", At: time.Unix(100000+int64(i), 0).UTC().Format(time.RFC3339), Message: fmt.Sprintf("Failed password for invalid user test%d from 8.8.8.8 port 999 ssh2", i)})
+		data, _ := json.Marshal(event{Event: "service", Unit: "sshd.service", Node: "test", At: time.Unix(100000+int64(i), 0).UTC().Format(time.RFC3339), Message: fmt.Sprintf("Failed password for invalid user test%d from 8.8.8.8 port 999 ssh2", i)})
 		e.consume(data, 100000+int64(i))
 	}
 	if e.Bans != 1 {
@@ -293,8 +293,8 @@ func TestManualReleaseIgnoresOldLogReplay(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		syn(e, ip.String(), 20000+i, 100200+int64(i), "0x0002")
 	}
-	if e.Bans != 1 || !e.isBanned(ip) {
-		t.Fatal("new scan after manual release not detected")
+	if e.Bans != 0 || e.SYNObservations != 1 {
+		t.Fatal("new SYN series after manual release was not observed safely")
 	}
 }
 
@@ -310,8 +310,15 @@ func TestTLSOnlySourcesCanPromoteToGeneralScannerBans(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		syn(e, ip.String(), 20000+i, 100001+int64(i), "0x0002")
 	}
+	if e.isBanned(ip) || e.Bans != 0 || e.SYNObservations != 1 {
+		t.Fatal("spoofable SYNs promoted TLS source to a permanent general ban")
+	}
+	for _, path := range []string{"/.env", "/.git/config"} {
+		data, _ := json.Marshal(event{Event: "http", Node: "test", At: time.Unix(100010, 0).UTC().Format(time.RFC3339), Src: ip.String(), Request: "GET " + path + " HTTP/1.1"})
+		e.consume(data, 100010)
+	}
 	if !e.isBanned(ip) || e.Bans != 1 {
-		t.Fatal("TLS source evaded independent port-scan promotion")
+		t.Fatal("independent HTTP scanning did not promote TLS source")
 	}
 }
 

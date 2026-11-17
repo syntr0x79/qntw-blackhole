@@ -20,6 +20,40 @@ BAD_PATH = re.compile(r'(?i)(/\.env(?:[/.]|$)|/\.git(?:/|$)|/wp-(?:admin|login)|
 FAILURE = re.compile(r'(?i)(failed password|invalid user|authentication failure|unable to negotiate|bad protocol|SSL_do_handshake\(\) failed|client sent invalid)')
 
 
+# Keep these server-authored SSH forms aligned with probe-blackhole/evidence.go.
+SSH_FAILURES = [re.compile(pattern) for pattern in (
+    r'^Failed password (?:for|\[redacted\]) (?:invalid user )?.+ from ([0-9a-fA-F:.]+) port ([0-9]+) ssh2(?: \[preauth\])?$',
+    r'^Invalid user .+ from ([0-9a-fA-F:.]+) port ([0-9]+)(?: \[preauth\])?$',
+    r'^Unable to negotiate with ([0-9a-fA-F:.]+) port ([0-9]+): no matching .+$',
+    r'^Bad protocol version identification .+ from ([0-9a-fA-F:.]+) port ([0-9]+)(?: \[preauth\])?$',
+)]
+
+
+def service_source(unit, message):
+    if unit not in ('ssh.service', 'sshd.service') or not isinstance(message, str):
+        return None
+    for pattern in SSH_FAILURES:
+        match = pattern.fullmatch(message)
+        if match and 0 < int(match[2]) <= 65535:
+            return match[1]
+    return None
+
+
+def nginx_error_source(message):
+    if not isinstance(message, str):
+        return None
+    # Error text may quote request-controlled headers. Ambiguous duplicate
+    # delimiters are insufficient evidence for an address, even when balanced.
+    if message.count(', client:') != 1 or message.count(', server:') != 1:
+        return None
+    unquoted = re.sub(r'"(?:\\.|[^"\\])*"', '', message)
+    if '"' in unquoted:
+        return None
+    prefix = unquoted.split(', request:', 1)[0]
+    match = re.search(r', client: ([0-9a-fA-F:.]+), server: [^,]+$', prefix)
+    return match[1] if match else None
+
+
 def stamp(t):
     return dt.datetime.fromtimestamp(t, UTC).isoformat(timespec='milliseconds')
 
@@ -92,9 +126,10 @@ def normalize(d, known, local_ips):
     event, node = d.get('event'), d.get('node', '')
     src = d.get('src') or d.get('client')
     message = d.get('message', '')
-    if event in ('service', 'nginx_error'):
-        match = re.search(r'(?:client: |\bfrom |\brhost=)([0-9a-fA-F:.]+)', message)
-        src = match[1].rstrip(':') if match else None
+    if event == 'service':
+        src = service_source(d.get('unit'), message)
+    elif event == 'nginx_error':
+        src = nginx_error_source(message)
     try:
         addr = ipaddress.ip_address(src)
     except (ValueError, TypeError):

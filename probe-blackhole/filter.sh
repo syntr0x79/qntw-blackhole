@@ -12,29 +12,44 @@ conf=${QNTW_PROBE_BLACKHOLE_CONFIG_DIR:-/etc/vpnshop-security/probe-blackhole}
 [[ $(jq -r .node "$conf/config.json") != shop-pl ]]
 gate_configured=$(jq -r '.tls_gate_enabled // false' "$conf/config.json")
 gate_ready=false
+gate_iface=''
+gate_mark=0
+gate_v4=''
+gate_v6=''
 if [[ "$gate_configured" == true ]]; then
  ready=$(jq -r '.tls_gate_ready_path // "/run/qntw-tls-alert-gate/routing-ready.json"' "$conf/config.json")
  node=$(jq -r .node "$conf/config.json")
  # A configured feature is not enough. The routing owner creates this marker
  # only after the listener and owned transparent-routing rules are active.
  if python3 - "$ready" "$node" <<'PY'
-import json, os, stat, sys
+import ipaddress, json, os, re, stat, sys
 try:
  path, node = sys.argv[1:]
  info = os.lstat(path)
  if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > 8192:
   raise ValueError('unsafe marker')
  with open(path) as f: marker = json.load(f)
- if marker.get('version') != 1 or marker.get('node') != node or marker.get('listener_port') != 14443 or marker.get('routing_table') != 'qntw_tls_gate':
+ if marker.get('version') != 2 or marker.get('node') != node or marker.get('listener_port') != 14443 or marker.get('routing_table') != 'qntw_tls_gate':
   raise ValueError('invalid marker')
- if marker.get('pid') and marker.get('procstart_ticks'):
-  with open('/proc/%d/stat' % int(marker['pid'])) as f: fields = f.read().rpartition(') ')[2].split()
-  if int(fields[19]) != int(marker['procstart_ticks']): raise ValueError('replaced listener')
+ if not re.fullmatch(r'[a-zA-Z0-9_.:-]{1,15}', marker['interface']) or not re.fullmatch(r'0x[0-9a-fA-F]{1,8}', marker['ingress_mark']):
+  raise ValueError('invalid routing scope')
+ if int(marker['ingress_mark'], 16) == 0 or not 1 <= len(marker['local_ips']) <= 64:
+  raise ValueError('invalid routing scope')
+ for address in marker['local_ips']:
+  if str(ipaddress.ip_address(address)) != address: raise ValueError('noncanonical gate address')
+ with open('/proc/%d/stat' % int(marker['pid'])) as f: fields = f.read().rpartition(') ')[2].split()
+ if int(fields[19]) != int(marker['procstart_ticks']): raise ValueError('replaced listener')
 except (OSError, ValueError, TypeError, KeyError, IndexError):
  sys.exit(1)
 PY
  then
-  if nft list table inet qntw_tls_gate >/dev/null 2>&1 && ss -Hltn '( sport = :14443 )' | grep -q .; then gate_ready=true; fi
+  if nft list table inet qntw_tls_gate >/dev/null 2>&1 && ss -Hltn '( sport = :14443 )' | grep -q .; then
+   gate_ready=true
+   gate_iface=$(jq -r '.interface' "$ready")
+   gate_mark=$(jq -r '.ingress_mark' "$ready")
+   gate_v4=$(jq -r '[.local_ips[]|select(contains(":")|not)]|join(",")' "$ready")
+   gate_v6=$(jq -r '[.local_ips[]|select(contains(":"))]|join(",")' "$ready")
+  fi
  fi
 fi
 interfaces=()
@@ -90,6 +105,16 @@ NFT
  printf 'set tls_gate_ports { type inet_service;'
  [[ "$gate_ready" != true ]] || printf ' elements = { 443 };'
  printf ' }\n'
+ for family in 4 6;do
+  kind=ipv4_addr;addresses=$gate_v4
+  if [[ "$family" == 6 ]];then kind=ipv6_addr;addresses=$gate_v6;fi
+  printf 'set tls_gate_v%s { type %s;' "$family" "$kind"
+  [[ -z "$addresses" ]] || printf ' elements = { %s };' "$addresses"
+  printf ' }\n'
+ done
+ printf 'set tls_gate_interfaces { type ifname;'
+ [[ "$gate_ready" != true ]] || printf ' elements = { "%s" };' "$gate_iface"
+ printf ' }\n'
  cat "$conf/counters.nft"
  cat <<'NFT'
 chain quarantine {
@@ -112,7 +137,9 @@ NFT
  cat <<'NFT'
 }
 chain ingress {
-    type filter hook prerouting priority -151; policy accept;
+    # Routing assigns both marks at -149 only to traffic actually steered to
+    # the gate. Evaluate the exception after that decision, before DNAT.
+    type filter hook prerouting priority -148; policy accept;
     iifname != @public_interfaces return
     ct direction reply return
     ct state related return
@@ -123,7 +150,10 @@ chain ingress {
     ip6 saddr @permanent_v6 counter name inbound_dropped drop
     ip saddr @sources_v4 counter name inbound_dropped drop
     ip6 saddr @sources_v6 counter name inbound_dropped drop
-    meta l4proto tcp tcp dport @tls_gate_ports return
+NFT
+ printf '    iifname @tls_gate_interfaces ip daddr @tls_gate_v4 tcp dport @tls_gate_ports ct mark %s meta mark %s return\n' "$gate_mark" "$gate_mark"
+ printf '    iifname @tls_gate_interfaces ip6 daddr @tls_gate_v6 tcp dport @tls_gate_ports ct mark %s meta mark %s return\n' "$gate_mark" "$gate_mark"
+ cat <<'NFT'
     ip saddr @tls_sources_v4 counter name inbound_dropped drop
     ip6 saddr @tls_sources_v6 counter name inbound_dropped drop
     meta l4proto tcp ct state established tcp flags & (syn | ack) == ack jump profiles
@@ -139,7 +169,10 @@ chain egress {
     ip6 daddr @permanent_v6 counter name reply_dropped drop
     ip daddr @sources_v4 counter name reply_dropped drop
     ip6 daddr @sources_v6 counter name reply_dropped drop
-    meta l4proto tcp tcp sport @tls_gate_ports return
+NFT
+ printf '    oifname @tls_gate_interfaces ip saddr @tls_gate_v4 tcp sport @tls_gate_ports ct mark %s return\n' "$gate_mark"
+ printf '    oifname @tls_gate_interfaces ip6 saddr @tls_gate_v6 tcp sport @tls_gate_ports ct mark %s return\n' "$gate_mark"
+ cat <<'NFT'
     ip daddr @tls_sources_v4 counter name reply_dropped drop
     ip6 daddr @tls_sources_v6 counter name reply_dropped drop
 }

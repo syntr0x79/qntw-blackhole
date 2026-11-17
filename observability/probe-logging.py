@@ -6,6 +6,7 @@ import ctypes as C
 import ctypes.util
 import datetime as dt
 import gzip
+import grp
 import hashlib
 import hmac
 import ipaddress
@@ -17,6 +18,8 @@ import re
 import shutil
 import signal
 import socket
+import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -51,24 +54,115 @@ def clean_message(value):
     return value[:1600]
 
 
+HTTP_FIELDS = {'event', 'epoch', 'client', 'peer', 'client_port', 'server', 'port',
+               'connection', 'connection_requests', 'host', 'sni', 'tls', 'cipher',
+               'uri', 'status', 'request_bytes', 'response_bytes', 'seconds', 'user_agent'}
+
+
 def nginx_event(line):
-    start = line.find('{"event":"http"')
-    if start >= 0:
-        d = json.loads(line[start:])
-        # The format contains no cookies, authorization, referer, body or args.
-        request = d.pop('request', '')
-        pieces = request.split(' ')
-        if len(pieces) >= 2:
-            d['request_line'] = pieces[0][:40] + ' ' + clean_path(pieces[1])
-        else:
-            d['request_line'] = clean_message(request)[:120]
-        d['uri'] = clean_path(d.get('uri', ''))
-        return {k: str(v)[:512] for k, v in d.items()}
-    # Error-level info includes failed TLS handshakes without HTTP requests.
-    start = line.find('qntw_error: ')
-    if start >= 0:
-        return {'event': 'nginx_error', 'message': clean_message(line[start + 12:])}
-    return None
+    # Match the first actual syslog tag, before examining request-controlled text.
+    tag = re.search(r'(?:^| )qntw_(http|error): ?', line)
+    if not tag:
+        return None
+    payload = line[tag.end():]
+    if tag[1] == 'error':
+        return {'event': 'nginx_error', 'message': clean_message(payload)}
+    d = json.loads(payload)
+    if not isinstance(d, dict) or d.get('event') != 'http':
+        raise ValueError('invalid HTTP log object')
+    if any(not isinstance(value, str) for value in d.values()):
+        raise ValueError('HTTP fields must be strings')
+    for key in ('client', 'peer', 'server'):
+        if d.get(key):
+            ipaddress.ip_address(d[key])
+    request = d.get('request', '')
+    pieces = request.split(' ')
+    result = {k: str(v)[:512] for k, v in d.items() if k in HTTP_FIELDS}
+    if len(pieces) >= 2:
+        result['request_line'] = pieces[0][:40] + ' ' + clean_path(pieces[1])
+    else:
+        result['request_line'] = clean_message(request)[:120]
+    result['uri'] = clean_path(d.get('uri', ''))
+    return result
+
+
+def nginx_sender_allowed(credentials, executable):
+    """Authenticate the kernel supplied sender, including shared web UIDs."""
+    pid, uid, _ = credentials
+    if uid == 0:
+        return True
+    try:
+        expected = os.stat(executable)
+        with open('/proc/%d/status' % pid) as source:
+            status = dict(line.rstrip().split(':', 1) for line in source if ':' in line)
+        if int(status['Uid'].split()[1]) != uid:
+            return False
+        parent = int(status['PPid'].strip())
+        master = os.stat('/proc/%d/exe' % parent)
+        with open('/proc/%d/status' % parent) as source:
+            parent_status = dict(line.rstrip().split(':', 1) for line in source if ':' in line)
+        identity = (expected.st_dev, expected.st_ino)
+        # An arbitrary user can run the nginx binary with their own config.
+        # Only workers of a root-owned nginx master supply enforcement input.
+        return (stat.S_ISREG(expected.st_mode) and expected.st_uid == 0
+                and not expected.st_mode & 0o022
+                and identity == (master.st_dev, master.st_ino)
+                and int(parent_status['Uid'].split()[1]) == 0)
+    except (OSError, ValueError, KeyError, IndexError):
+        return False
+
+
+def nginx_socket_group(cfg):
+    if 'nginx_socket_gid' in cfg:
+        gid = cfg['nginx_socket_gid']
+        if isinstance(gid, bool) or not isinstance(gid, int) or not 0 <= gid <= 0xffffffff:
+            raise ValueError('invalid nginx_socket_gid')
+        return gid
+    for name in ('www-data', 'nginx'):
+        try:
+            return grp.getgrnam(name).gr_gid
+        except KeyError:
+            pass
+    return 0
+
+
+HUB_REPLAY_CAPACITY = 32768
+
+
+def hub_event(raw, address, peers):
+    """Reject untrusted shapes before indexing or authenticating their contents."""
+    if len(raw) > 16000:
+        raise ValueError('oversized hub record')
+    d = json.loads(raw)
+    if not isinstance(d, dict) or not isinstance(d.get('node'), str):
+        raise ValueError('invalid hub object')
+    peer = peers.get(d['node'])
+    if not peer or address != peer['mesh_ip']:
+        return None
+    signature = d.pop('signature', None)
+    if not isinstance(signature, str) or not re.fullmatch(r'[0-9a-f]{64}', signature):
+        return None
+    check = hmac.new(peer['key'].encode(), json.dumps(d, sort_keys=True, separators=(',', ':')).encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, check):
+        return None
+    event, observed = d.get('event'), d.get('observed_utc')
+    if not isinstance(event, str) or not re.fullmatch(r'[a-z_]{1,64}', event):
+        raise ValueError('invalid hub event')
+    if not isinstance(observed, str) or len(observed) > 64:
+        raise ValueError('invalid hub timestamp')
+    at = dt.datetime.fromisoformat(observed)
+    if at.tzinfo is None or not time.time() - 90 <= at.timestamp() <= time.time() + 5:
+        raise ValueError('hub timestamp is stale or invalid')
+    # Fields consumed by the analyzer are typed before crossing its trust boundary.
+    for key in ('src', 'client', 'dst', 'message', 'flags'):
+        if key in d and not isinstance(d[key], str):
+            raise ValueError('invalid hub field')
+    for key in ('sensors', 'counters'):
+        if key in d and (not isinstance(d[key], dict) or any(
+                not isinstance(k, str) or not isinstance(v, (int, float))
+                for k, v in d[key].items())):
+            raise ValueError('invalid hub health')
+    return d
 
 
 def conntrack_event(line, local):
@@ -309,7 +403,7 @@ class Collector:
     def emit(self, d):
         if not d:
             return
-        d = {'observed_utc': utc(), 'node': self.cfg['node'], **d}
+        d = {**d, 'observed_utc': utc(), 'node': self.cfg['node']}
         try:
             self.events.put_nowait(d)
         except queue.Full:
@@ -337,6 +431,13 @@ class Collector:
                     children.append(capture)
                     self.children.append(capture)
                     threading.Thread(target=errors, args=(capture, 'capture'), daemon=True).start()
+                    def statistics(child):
+                        while not self.stop.wait(15) and child.poll() is None:
+                            try:
+                                child.send_signal(signal.SIGUSR1)
+                            except ProcessLookupError:
+                                return
+                    threading.Thread(target=statistics, args=(capture,), daemon=True).start()
                 p = subprocess.Popen(args, stdin=capture.stdout if capture else None,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
                 if capture:
@@ -416,27 +517,44 @@ class Collector:
                     'code': row.get('icmp.code') or row.get('icmpv6.code')}
         return None
 
-    def nginx(self):
-        path = '/run/vpnshop-probes/nginx.sock'
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-        sock.bind(path)
-        os.chmod(path, 0o666)
-        sock.settimeout(1)
-        self.health['nginx_receiver'] = 1
+    def nginx(self, path='/run/vpnshop-probes/nginx.sock'):
+        executable = self.cfg.get('nginx_executable', '/usr/sbin/nginx')
         while not self.stop.is_set():
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
             try:
-                data = sock.recv(65535).decode(errors='replace')
-                self.emit(nginx_event(data))
-            except socket.timeout:
-                pass
-            except (ValueError, TypeError):
-                self.counts['nginx_parse_dropped'] += 1
-        sock.close()
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                sock.bind(path)
+                os.chown(path, 0, nginx_socket_group(self.cfg))
+                os.chmod(path, 0o660)
+                sock.settimeout(1)
+                self.health['nginx_receiver'] = 1
+                while not self.stop.is_set():
+                    try:
+                        data, ancillary, flags, _ = sock.recvmsg(65535, socket.CMSG_SPACE(12))
+                        credentials = [struct.unpack('3i', value[:12]) for level, kind, value in ancillary
+                                       if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS
+                                       and len(value) >= 12]
+                        if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(credentials) != 1
+                                or not nginx_sender_allowed(credentials[0], executable)):
+                            self.counts['nginx_rejected'] += 1
+                            continue
+                        self.emit(nginx_event(data.decode(errors='replace')))
+                    except socket.timeout:
+                        pass
+                    except (ValueError, TypeError, RecursionError):
+                        self.counts['nginx_parse_dropped'] += 1
+            except OSError as exc:
+                self.counts['nginx_receiver_errors'] += 1
+                self.emit({'event': 'sensor_error', 'sensor': 'nginx_receiver', 'message': str(exc)[:300]})
+            finally:
+                self.health['nginx_receiver'] = 0
+                sock.close()
+            self.stop.wait(2)
 
     def journal(self, line):
         d = json.loads(line)
@@ -528,31 +646,45 @@ class Collector:
             self.stop.wait(2)
 
     def hub(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
-        sock.bind((self.cfg['hub_bind'], 19014))
-        sock.settimeout(1)
-        self.health['hub'] = 1
         while not self.stop.is_set():
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                raw, addr = sock.recvfrom(16384)
-                d = json.loads(raw)
-                peer = self.cfg['peers'].get(d.get('node'))
-                if not peer or addr[0] != peer['mesh_ip']:
-                    self.counts['hub_rejected'] += 1
-                    continue
-                signature = d.pop('signature', '')
-                check = hmac.new(peer['key'].encode(), json.dumps(d, sort_keys=True, separators=(',', ':')).encode(), hashlib.sha256).hexdigest()
-                if not hmac.compare_digest(signature, check):
-                    self.counts['hub_rejected'] += 1
-                    continue
-                self.last_remote[d['node']] = time.time()
-                self.events.put_nowait({**d, 'received_utc': utc()})
-            except socket.timeout:
-                pass
-            except (ValueError, KeyError, TypeError, queue.Full):
-                self.counts['hub_parse_dropped'] += 1
-        sock.close()
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+                sock.bind((self.cfg['hub_bind'], 19014))
+                sock.settimeout(1)
+                self.health['hub'] = 1
+                seen = collections.OrderedDict()
+                while not self.stop.is_set():
+                    try:
+                        raw, addr = sock.recvfrom(16384)
+                        digest = hashlib.sha256(raw).digest()
+                        now = time.monotonic()
+                        if digest in seen and now - seen[digest] <= 95:
+                            self.counts['hub_replay_dropped'] += 1
+                            continue
+                        d = hub_event(raw, addr[0], self.cfg['peers'])
+                        if d is None:
+                            self.counts['hub_rejected'] += 1
+                            continue
+                        while seen and now - next(iter(seen.values())) > 95:
+                            seen.popitem(last=False)
+                        if len(seen) >= HUB_REPLAY_CAPACITY:
+                            seen.popitem(last=False)
+                            self.counts['hub_replay_cache_evicted'] += 1
+                        seen[digest] = now
+                        self.last_remote[d['node']] = time.time()
+                        self.events.put_nowait({**d, 'received_utc': utc()})
+                    except socket.timeout:
+                        pass
+                    except (ValueError, KeyError, TypeError, RecursionError, queue.Full):
+                        self.counts['hub_parse_dropped'] += 1
+            except OSError as exc:
+                self.counts['hub_errors'] += 1
+                self.emit({'event': 'sensor_error', 'sensor': 'hub', 'message': str(exc)[:300]})
+            finally:
+                self.health['hub'] = 0
+                sock.close()
+            self.stop.wait(2)
 
     def forward(self, d):
         if not self.cfg.get('hub_address'):

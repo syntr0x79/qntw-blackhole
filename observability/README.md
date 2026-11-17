@@ -54,6 +54,17 @@ foreground run, also create `/run/vpnshop-probes` first:
 python3 probe-logging.py /path/to/private-collector.json
 ```
 
+The nginx Unix socket is mode `0660`, owned by root and the `www-data` group
+(`nginx` is the fallback group when `www-data` is absent). For a custom worker
+group, set `nginx_socket_gid` in the private collector configuration. The receiver
+uses Linux `SCM_CREDENTIALS` and accepts root or a worker whose parent is a root
+nginx master running the trusted executable. The executable defaults to
+`/usr/sbin/nginx`; set `nginx_executable` for a custom installation. A process
+sharing the web worker UID cannot supply enforcement evidence solely by knowing
+the socket path. Rootless nginx masters require an operator-reviewed trusted
+forwarding arrangement. Sender identity, node and observation time cannot be
+overridden by fields inside an HTTP log object.
+
 The optional `probe-logging-nginx.conf` defines an nginx `http`-context format
 and syslog destination. Integrate it into the existing nginx configuration and
 validate that configuration before reloading nginx. It does not configure
@@ -65,7 +76,8 @@ replacement service.
 Collector logs use mode `0600` in a `0700` directory, with gzip rotation at
 16 MiB or roughly one hour and retention bounded by seven days and
 `budget_bytes` (default 512 MiB). Logging pauses below 1 GiB free space and
-reports drops. The metrics file is
+reports drops. Capture loss statistics are requested every 15 seconds, including while the
+capture process is running. The metrics file is
 `/var/lib/node_exporter/textfile/probe_logging.prom`.
 
 ## Central collection
@@ -103,7 +115,14 @@ with the same config fields and a distinct wire format. Do not expose these
 receivers publicly. Omit `hub_address` on a hub unless its own local evidence
 must go to another receiver. Received evidence is never forwarded again.
 Large TLS ClientHello details stay in the local journal and are forwarded by
-hash reference instead of silent truncation.
+hash reference instead of silent truncation. The receiver accepts authenticated
+records from the preceding 90 seconds with at most five seconds of future clock
+skew. Keep peer clocks synchronized. Authenticated duplicate datagrams are
+rejected while retained in a bounded 95-second replay cache. At capacity, its
+oldest entry is evicted and counted while new authenticated evidence continues
+to be accepted. Replay detection is best effort under high volume; replay and
+schema drops and cache evictions have separate counters. A malformed datagram cannot terminate the receiver;
+socket failures clear its health and trigger a retry.
 
 ## Analyzer
 

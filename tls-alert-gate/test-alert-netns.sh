@@ -217,6 +217,33 @@ nsenter -t "$cpid" -n python3 "$work/client.py" "$work" versions "$stage/profile
 if [[ "$bh_enabled" == true ]];then
  for _ in $(seq 1 80);do if nft get element inet qntw_probe_blackhole tls_sources_v4 '{ 192.0.2.41 }' >/dev/null 2>&1&&jq -e '.sources["192.0.2.51"]!=null' "$work/known.json" >/dev/null;then break;fi;sleep .1;done
  nft get element inet qntw_probe_blackhole tls_sources_v4 '{ 192.0.2.31,192.0.2.40,192.0.2.41,192.0.2.51 }' >/dev/null
+ # A wildcard backend also accepts secondary public addresses. Only connections
+ # actually diverted through the gate may use the TLS-only 443 exception.
+ ip address add 192.0.2.11/24 dev qgate0
+ nsenter -t "$cpid" -n python3 - <<'PY'
+import socket
+with socket.socket() as s:
+ s.bind(('192.0.2.31', 0)); s.settimeout(.6)
+ try: s.connect(('192.0.2.11', 443))
+ except TimeoutError: pass
+ else: raise AssertionError('TLS source reached an unprotected public alias')
+PY
+ nft -f - <<'NFT'
+table inet qntw_test_qos {
+ chain assign_qos { type filter hook prerouting priority -155; policy accept;
+  ip saddr 192.0.2.31 tcp dport 443 ct state new ct mark set 1234
+ }
+}
+NFT
+ nsenter -t "$cpid" -n python3 - <<'PY'
+import socket
+with socket.socket() as s:
+ s.bind(('192.0.2.31', 0)); s.settimeout(.6)
+ try: s.connect(('192.0.2.10', 443))
+ except TimeoutError: pass
+ else: raise AssertionError('TLS source bypassed diversion with another conntrack mark')
+PY
+ nft delete table inet qntw_test_qos
  nsenter -t "$cpid" -n python3 - "$work" <<'PY'
 import socket,ssl,sys
 for ip,port in [('192.0.2.50',443),('192.0.2.31',22)]:
@@ -262,6 +289,14 @@ touch "$work/held-go3"
 wait "$heldpid";heldpid='';wait "$oldpid";oldpid=''
 for _ in $(seq 1 80);do kill -0 "$gpid" 2>/dev/null||break;sleep .1;done
 wait "$gpid";gpid=''
+mkdir -p "$work/failing-bin"
+printf '#!/bin/sh\nexit 1\n' > "$work/failing-bin/conntrack"
+chmod 755 "$work/failing-bin/conntrack"
+if PATH="$work/failing-bin:$PATH" "$stage/routing.sh" remove "$work/routing.json";then
+ echo 'routing removed despite a failed conntrack dump' >&2;exit 1
+fi
+[[ -e "$QNTW_TLS_GATE_ROUTING_STATE" ]]
+ip -4 address show dev lo |grep -Fq 'inet 10.254.254.1/32 '
 for _ in $(seq 1 20);do if "$stage/routing.sh" remove "$work/routing.json";then break;fi;sleep .1;done
 [[ ! -e "$QNTW_TLS_GATE_ROUTING_STATE" ]]
 python3 - "$work" <<'PY'
