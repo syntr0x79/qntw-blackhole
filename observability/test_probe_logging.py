@@ -313,9 +313,10 @@ for line in sys.stdin:
  subprocess.run([sys.executable,'-c',sys.argv[1],sys.argv[2]],preexec_fn=worker,check=True)
  print('sent',flush=True)
 """
-            master = subprocess.Popen([executable, '-u', '-c', master_script, sender, path],
-                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            master = None
             try:
+                master = subprocess.Popen([executable, '-u', '-c', master_script, sender, path],
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
                 deadline = time.monotonic() + 3
                 while not collector.health.get('nginx_receiver') and time.monotonic() < deadline:
                     time.sleep(.01)
@@ -340,8 +341,9 @@ for line in sys.stdin:
                 send()
                 self.assertEqual(collector.counts['nginx_rejected'], 0)
             finally:
-                master.terminate(); master.wait(timeout=3)
-                master.stdin.close(); master.stdout.close()
+                if master is not None:
+                    master.terminate(); master.wait(timeout=3)
+                    master.stdin.close(); master.stdout.close()
                 collector.stop.set(); receiver.join(timeout=3)
                 collector.ring.file.close(); collector.sender.close()
 
