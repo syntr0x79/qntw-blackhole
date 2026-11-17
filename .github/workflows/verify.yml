@@ -1,0 +1,55 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: observability/udp-observer/go.sum
+      - name: Install fixture tools
+        run: sudo apt-get update && sudo apt-get install -y ruby
+      - name: Unit, syntax and fixture checks
+        run: make test vet race
+
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: observability/udp-observer/go.sum
+      - name: Static Linux build
+        run: make build TARGET_OS=linux TARGET_ARCH=${{ matrix.arch }}
+      - name: Verify fresh installation tree
+        run: make test-stage TARGET_OS=linux TARGET_ARCH=${{ matrix.arch }}
+
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: observability/udp-observer/go.sum
+      - name: Isolated Linux integration tests
+        run: make test-stage docker-integration TARGET_OS=linux TARGET_ARCH=amd64

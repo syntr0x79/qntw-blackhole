@@ -1,0 +1,15 @@
+{
+  "log_dir": "/var/log/vpnshop-probes",
+  "output_dir": "/var/lib/vpnshop-probe-analysis",
+  "known_sources": [
+    "198.51.100.20"
+  ],
+  "local_ips": [
+    "192.0.2.10",
+    "192.0.2.20"
+  ],
+  "expected_nodes": [
+    "edge-01",
+    "hub-01"
+  ]
+}

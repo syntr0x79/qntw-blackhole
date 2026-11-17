@@ -1,0 +1,13 @@
+[Unit]
+Description=Bounded silent blackhole for confirmed probes
+After=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/vpnshop-probe-blackhole-filter apply
+ExecReload=/usr/local/libexec/vpnshop-probe-blackhole-filter apply
+ExecStop=/usr/local/libexec/vpnshop-probe-blackhole-filter remove
+
+[Install]
+WantedBy=multi-user.target

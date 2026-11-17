@@ -1,0 +1,36 @@
+[Unit]
+Description=VPNShop passive UDP evidence before firewall DROP
+After=network-online.target vpnshop-probe-logging.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/vpnshop-udp-observer
+Restart=on-failure
+RestartSec=5
+StateDirectory=vpnshop-udp-observer
+StateDirectoryMode=0700
+LogsDirectory=vpnshop-udp
+LogsDirectoryMode=0700
+UMask=0077
+Nice=15
+CPUQuota=20%
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+ReadWritePaths=/var/log/vpnshop-udp /var/lib/vpnshop-udp-observer /var/lib/node_exporter/textfile
+TimeoutStopSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

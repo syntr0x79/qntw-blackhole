@@ -1,0 +1,29 @@
+[Unit]
+Description=Confirm scanning sources from local sanitized ingress logs
+Requires=vpnshop-probe-blackhole-filter.service
+After=vpnshop-probe-blackhole-filter.service vpnshop-probe-logging.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/vpnshop-probe-blackhole -config /etc/vpnshop-security/probe-blackhole/config.json
+Restart=on-failure
+RestartSec=3
+User=root
+# Textfile metrics must be readable by the unprivileged node exporter.
+UMask=0022
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/node_exporter/textfile
+StateDirectory=vpnshop-probe-blackhole
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/vpnshop-probe-blackhole
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+MemoryMax=128M
+CPUQuota=15%
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,43 @@
+[Unit]
+Description=Quantway TCP443 TLS scanner Alert gate
+After=network-online.target nftables.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=QNTW_TLS_ALERT_UNIT=%n
+ExecStart=/usr/local/libexec/vpnshop-tls-alert-gate -config /etc/vpnshop-security/tls-alert-gate/gate.json
+ExecStartPost=/usr/local/libexec/vpnshop-tls-alert-control start
+# Disable only NEW diversion before SIGTERM. The gate drains existing streams;
+# its return policy routes and aliases remain until a later explicit removal.
+ExecStop=/usr/local/libexec/vpnshop-tls-alert-control disable-new
+ExecStopPost=/usr/local/libexec/vpnshop-tls-alert-control disable-new
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=60s
+TimeoutStopSec=300s
+RuntimeDirectory=qntw-tls-alert-gate
+RuntimeDirectoryMode=0700
+StateDirectory=vpnshop-tls-alert
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+ReadWritePaths=/run /var/lib/vpnshop-tls-alert
+LimitNOFILE=32768
+MemoryHigh=320M
+MemoryMax=384M
+CPUQuota=100%
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

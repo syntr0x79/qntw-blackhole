@@ -1,0 +1,29 @@
+[Unit]
+Description=Passive triage of VPNShop ingress evidence every 15 seconds
+After=vpnshop-probe-logging.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/libexec/vpnshop-probe-analysis --config /etc/vpnshop-probe-analysis.json
+Restart=on-failure
+RestartSec=10
+Nice=15
+CPUQuota=40%
+MemoryMax=384M
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+CapabilityBoundingSet=
+ReadOnlyPaths=/var/log/vpnshop-probes
+ReadWritePaths=/var/lib/vpnshop-probe-analysis
+
+[Install]
+WantedBy=multi-user.target

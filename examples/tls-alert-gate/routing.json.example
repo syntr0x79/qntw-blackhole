@@ -1,0 +1,13 @@
+{
+  "node": "edge-01",
+  "interface": "eth0",
+  "local_ips": ["192.0.2.10"],
+  "listen_port": 14443,
+  "ingress_mark": "0x514e01",
+  "backend_mark": "0x514e02",
+  "route_table": 151,
+  "rule_priority_ingress": 15100,
+  "rule_priority_backend": 15101,
+  "backend_ipv4": "10.254.254.1",
+  "backend_ipv6": "fd51:4e::1"
+}

@@ -1,0 +1,26 @@
+{
+  "node": "hub-01",
+  "interface": "eth0",
+  "local_ips": [
+    "192.0.2.20"
+  ],
+  "listen_ports": [
+    22,
+    80,
+    443,
+    7443,
+    7444
+  ],
+  "log_dir": "/var/log/vpnshop-probes",
+  "budget_bytes": 2147483648,
+  "hello_detail_exclude_sources": [
+    "198.51.100.20"
+  ],
+  "hub_bind": "10.200.0.2",
+  "peers": {
+    "edge-01": {
+      "mesh_ip": "10.200.0.10",
+      "key": "REPLACE_WITH_A_NEW_RANDOM_PER_NODE_SHARED_SECRET"
+    }
+  }
+}

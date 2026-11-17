@@ -1,0 +1,32 @@
+[Unit]
+Description=VPNShop public ingress evidence (metadata only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/libexec/vpnshop-probe-logging /etc/vpnshop-probe-logging.json
+Restart=always
+RestartSec=5s
+RuntimeDirectory=vpnshop-probes
+RuntimeDirectoryMode=0755
+UMask=0077
+Nice=10
+CPUQuota=20%
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=32
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/vpnshop-probes /run/vpnshop-probes /var/lib/node_exporter/textfile
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target

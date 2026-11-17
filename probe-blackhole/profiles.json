@@ -1,0 +1,503 @@
+[
+  {
+    "ja3": "af232ab01c5a432d1148b4f805c5df16",
+    "hello": {
+      "schema": 1,
+      "record_versions": [
+        769
+      ],
+      "record_lengths": [
+        134
+      ],
+      "handshake_lengths": [
+        130
+      ],
+      "cipher_suites": [
+        49161,
+        49171,
+        49162,
+        49172
+      ],
+      "extension_types": [
+        11,
+        65281,
+        23,
+        18,
+        5,
+        10,
+        43
+      ],
+      "extension_lengths": [
+        2,
+        1,
+        0,
+        0,
+        5,
+        10,
+        3
+      ],
+      "supported_groups": [
+        29,
+        23,
+        24,
+        25
+      ],
+      "ec_point_formats": [
+        0
+      ],
+      "signature_algorithms": [],
+      "supported_versions": [
+        769
+      ],
+      "key_share_groups": [],
+      "compression_methods": [
+        0
+      ],
+      "psk_key_exchange_modes": [],
+      "certificate_compression_algorithms": [],
+      "cipher_suites_length": 8,
+      "compression_methods_length": 1,
+      "extensions_length": 49,
+      "session_id_length": 32,
+      "frame_captured_length": 205,
+      "frame_wire_length": 205,
+      "ja3_full": "769,49161-49171-49162-49172,11-65281-23-18-5-10-43,29-23-24-25,0",
+      "legacy_version": "0x0301",
+      "alpn_protocols": [],
+      "ja3_matches": true,
+      "complete": true,
+      "incomplete_reasons": []
+    }
+  },
+  {
+    "ja3": "80eada7719bbed095130efee745e89e2",
+    "hello": {
+      "schema": 1,
+      "record_versions": [
+        768
+      ],
+      "record_lengths": [
+        77
+      ],
+      "handshake_lengths": [
+        73
+      ],
+      "cipher_suites": [
+        57,
+        56,
+        136,
+        135,
+        51,
+        50,
+        154,
+        153,
+        69,
+        68,
+        53,
+        132,
+        47,
+        150,
+        65,
+        7,
+        255
+      ],
+      "extension_types": [],
+      "extension_lengths": [],
+      "supported_groups": [],
+      "ec_point_formats": [],
+      "signature_algorithms": [],
+      "supported_versions": [],
+      "key_share_groups": [],
+      "compression_methods": [
+        0
+      ],
+      "psk_key_exchange_modes": [],
+      "certificate_compression_algorithms": [],
+      "cipher_suites_length": 34,
+      "compression_methods_length": 1,
+      "extensions_length": null,
+      "session_id_length": 0,
+      "frame_captured_length": 148,
+      "frame_wire_length": 148,
+      "ja3_full": "768,57-56-136-135-51-50-154-153-69-68-53-132-47-150-65-7-255,,,",
+      "legacy_version": "0x0300",
+      "alpn_protocols": [],
+      "ja3_matches": true,
+      "complete": true,
+      "incomplete_reasons": []
+    }
+  },
+  {
+    "ja3": "51da711b7d569fac858b548296cc5ca0",
+    "hello": {
+      "schema": 1,
+      "record_versions": [
+        769
+      ],
+      "record_lengths": [
+        134
+      ],
+      "handshake_lengths": [
+        130
+      ],
+      "cipher_suites": [
+        49161,
+        49171,
+        49162,
+        49172
+      ],
+      "extension_types": [
+        11,
+        65281,
+        23,
+        18,
+        5,
+        10,
+        43
+      ],
+      "extension_lengths": [
+        2,
+        1,
+        0,
+        0,
+        5,
+        10,
+        3
+      ],
+      "supported_groups": [
+        29,
+        23,
+        24,
+        25
+      ],
+      "ec_point_formats": [
+        0
+      ],
+      "signature_algorithms": [],
+      "supported_versions": [
+        770
+      ],
+      "key_share_groups": [],
+      "compression_methods": [
+        0
+      ],
+      "psk_key_exchange_modes": [],
+      "certificate_compression_algorithms": [],
+      "cipher_suites_length": 8,
+      "compression_methods_length": 1,
+      "extensions_length": 49,
+      "session_id_length": 32,
+      "frame_captured_length": 205,
+      "frame_wire_length": 205,
+      "ja3_full": "770,49161-49171-49162-49172,11-65281-23-18-5-10-43,29-23-24-25,0",
+      "legacy_version": "0x0302",
+      "alpn_protocols": [],
+      "ja3_matches": true,
+      "complete": true,
+      "incomplete_reasons": []
+    }
+  },
+  {
+    "ja3": "08457f913bb93e139bca198696428c81",
+    "hello": {
+      "schema": 1,
+      "record_versions": [
+        769
+      ],
+      "record_lengths": [
+        198
+      ],
+      "handshake_lengths": [
+        194
+      ],
+      "cipher_suites": [
+        49199,
+        49200,
+        49171,
+        49172,
+        156,
+        157,
+        47,
+        53
+      ],
+      "extension_types": [
+        11,
+        65281,
+        23,
+        18,
+        5,
+        10,
+        13,
+        50,
+        43
+      ],
+      "extension_lengths": [
+        2,
+        1,
+        0,
+        0,
+        5,
+        10,
+        22,
+        26,
+        3
+      ],
+      "supported_groups": [
+        29,
+        23,
+        24,
+        25
+      ],
+      "ec_point_formats": [
+        0
+      ],
+      "signature_algorithms": [
+        2052,
+        1027,
+        2055,
+        2053,
+        2054,
+        1025,
+        1281,
+        1537,
+        1283,
+        1539,
+        2052,
+        1027,
+        2055,
+        2053,
+        2054,
+        1025,
+        1281,
+        1537,
+        1283,
+        1539,
+        513,
+        515
+      ],
+      "supported_versions": [
+        771
+      ],
+      "key_share_groups": [],
+      "compression_methods": [
+        0
+      ],
+      "psk_key_exchange_modes": [],
+      "certificate_compression_algorithms": [],
+      "cipher_suites_length": 16,
+      "compression_methods_length": 1,
+      "extensions_length": 105,
+      "session_id_length": 32,
+      "frame_captured_length": 269,
+      "frame_wire_length": 269,
+      "ja3_full": "771,49199-49200-49171-49172-156-157-47-53,11-65281-23-18-5-10-13-50-43,29-23-24-25,0",
+      "legacy_version": "0x0303",
+      "alpn_protocols": [],
+      "ja3_matches": true,
+      "complete": true,
+      "incomplete_reasons": []
+    }
+  },
+  {
+    "ja3": "4b7c9e5cd9596f4aafe940b8fc41ff89",
+    "hello": {
+      "schema": 1,
+      "record_versions": [
+        769
+      ],
+      "record_lengths": [
+        1458
+      ],
+      "handshake_lengths": [
+        1454
+      ],
+      "cipher_suites": [
+        4865,
+        4866,
+        4867
+      ],
+      "extension_types": [
+        11,
+        65281,
+        23,
+        18,
+        5,
+        10,
+        13,
+        50,
+        43,
+        51
+      ],
+      "extension_lengths": [
+        2,
+        1,
+        0,
+        0,
+        5,
+        12,
+        22,
+        32,
+        3,
+        1258
+      ],
+      "supported_groups": [
+        4588,
+        29,
+        23,
+        24,
+        25
+      ],
+      "ec_point_formats": [
+        0
+      ],
+      "signature_algorithms": [
+        2308,
+        2309,
+        2310,
+        2052,
+        1027,
+        2055,
+        2053,
+        2054,
+        1283,
+        1539,
+        2308,
+        2309,
+        2310,
+        2052,
+        1027,
+        2055,
+        2053,
+        2054,
+        1025,
+        1281,
+        1537,
+        1283,
+        1539,
+        513,
+        515
+      ],
+      "supported_versions": [
+        772
+      ],
+      "key_share_groups": [
+        4588,
+        29
+      ],
+      "compression_methods": [
+        0
+      ],
+      "psk_key_exchange_modes": [],
+      "certificate_compression_algorithms": [],
+      "cipher_suites_length": 6,
+      "compression_methods_length": 1,
+      "extensions_length": 1375,
+      "session_id_length": 32,
+      "frame_captured_length": 1529,
+      "frame_wire_length": 1529,
+      "ja3_full": "771,4865-4866-4867,11-65281-23-18-5-10-13-50-43-51,4588-29-23-24-25,0",
+      "legacy_version": "0x0303",
+      "alpn_protocols": [],
+      "ja3_matches": true,
+      "complete": true,
+      "incomplete_reasons": []
+    }
+  },
+  {
+    "ja3": "387fec6871738fb5adb3695ca1503040",
+    "hello": {
+      "schema": 1,
+      "record_versions": [
+        769
+      ],
+      "record_lengths": [
+        190
+      ],
+      "handshake_lengths": [
+        186
+      ],
+      "cipher_suites": [
+        49195,
+        49196,
+        49161,
+        49162
+      ],
+      "extension_types": [
+        11,
+        65281,
+        23,
+        18,
+        5,
+        10,
+        13,
+        50,
+        43
+      ],
+      "extension_lengths": [
+        2,
+        1,
+        0,
+        0,
+        5,
+        10,
+        22,
+        26,
+        3
+      ],
+      "supported_groups": [
+        29,
+        23,
+        24,
+        25
+      ],
+      "ec_point_formats": [
+        0
+      ],
+      "signature_algorithms": [
+        2052,
+        1027,
+        2055,
+        2053,
+        2054,
+        1025,
+        1281,
+        1537,
+        1283,
+        1539,
+        2052,
+        1027,
+        2055,
+        2053,
+        2054,
+        1025,
+        1281,
+        1537,
+        1283,
+        1539,
+        513,
+        515
+      ],
+      "supported_versions": [
+        771
+      ],
+      "key_share_groups": [],
+      "compression_methods": [
+        0
+      ],
+      "psk_key_exchange_modes": [],
+      "certificate_compression_algorithms": [],
+      "cipher_suites_length": 8,
+      "compression_methods_length": 1,
+      "extensions_length": 105,
+      "session_id_length": 32,
+      "frame_captured_length": 261,
+      "frame_wire_length": 261,
+      "ja3_full": "771,49195-49196-49161-49162,11-65281-23-18-5-10-13-50-43,29-23-24-25,0",
+      "legacy_version": "0x0303",
+      "alpn_protocols": [],
+      "ja3_matches": true,
+      "complete": true,
+      "incomplete_reasons": []
+    }
+  }
+]

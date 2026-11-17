@@ -1,0 +1,9 @@
+{
+  "node": "edge-01",
+  "local_ips": ["192.0.2.10"],
+  "trusted_ips": ["198.51.100.20", "10.200.0.2"],
+  "listen_ports": [22, 80, 443, 7443, 7444],
+  "tls_gate_enabled": false,
+  "tls_gate_ready_path": "/run/qntw-tls-alert-gate/routing-ready.json",
+  "tls_gate_sources_path": "/var/lib/vpnshop-tls-alert/known-sources.json"
+}

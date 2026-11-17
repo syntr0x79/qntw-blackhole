@@ -1,0 +1,21 @@
+{
+  "node": "edge-01",
+  "interface": "eth0",
+  "local_ips": [
+    "192.0.2.10"
+  ],
+  "listen_ports": [
+    22,
+    80,
+    443,
+    7443,
+    7444
+  ],
+  "log_dir": "/var/log/vpnshop-probes",
+  "budget_bytes": 536870912,
+  "hello_detail_exclude_sources": [
+    "198.51.100.20"
+  ],
+  "hub_address": "10.200.0.2",
+  "key": "REPLACE_WITH_A_NEW_RANDOM_PER_NODE_SHARED_SECRET"
+}
