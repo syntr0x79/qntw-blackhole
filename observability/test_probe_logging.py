@@ -14,6 +14,7 @@ import threading
 import time
 import subprocess
 import sys
+import shutil
 from unittest import mock
 
 spec = importlib.util.spec_from_file_location('probe_logging', os.path.join(os.path.dirname(__file__), 'probe-logging.py'))
@@ -264,12 +265,85 @@ class InputTrustTests(unittest.TestCase):
         self.assertFalse(m.nginx_sender_allowed((123, 65534, 65534), '/missing'))
         regular = type('Stat', (), {'st_mode': 0o100755, 'st_uid': 0, 'st_dev': 1, 'st_ino': 2})()
         statuses = ['Uid:\t65534 65534 65534 65534\nPPid:\t12\n',
-                    'Uid:\t0 0 0 0\nPPid:\t1\n']
+                    'Uid:\t0 0 0 0\nPPid:\t1\n',
+                    '12 (nginx) ' + ' '.join(['S'] + ['0'] * 18 + ['100'])]
         with mock.patch.object(m.os, 'stat', return_value=regular), mock.patch('builtins.open', side_effect=[io.StringIO(x) for x in statuses]):
             self.assertTrue(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx'))
         statuses[1] = 'Uid:\t65534 65534 65534 65534\nPPid:\t1\n'
         with mock.patch.object(m.os, 'stat', return_value=regular), mock.patch('builtins.open', side_effect=[io.StringIO(x) for x in statuses]):
             self.assertFalse(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx'))
+
+    def test_nginx_master_cache_survives_installed_inode_replacement_and_checks_start_time(self):
+        old = type('Stat', (), {'st_mode': 0o100755, 'st_uid': 0, 'st_dev': 1, 'st_ino': 2})()
+        new = type('Stat', (), {'st_mode': 0o100755, 'st_uid': 0, 'st_dev': 1, 'st_ino': 3})()
+        files = {'/proc/123/status': 'Uid:\t65534 65534 65534 65534\nPPid:\t12\n',
+                 '/proc/12/status': 'Uid:\t0 0 0 0\nPPid:\t1\n',
+                 '/proc/12/stat': '12 (nginx) ' + ' '.join(['S'] + ['0'] * 18 + ['100'])}
+        installed = [old]
+        cache = collections.OrderedDict()
+        def metadata(path):
+            return installed[0] if path == '/usr/sbin/nginx' else old
+        with mock.patch.object(m.os, 'stat', side_effect=metadata), \
+                mock.patch('builtins.open', side_effect=lambda path: io.StringIO(files[path])), \
+                mock.patch.object(m.os, 'readlink', return_value='/untrusted (deleted)'):
+            self.assertTrue(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx', cache))
+            installed[0] = new
+            self.assertTrue(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx', cache))
+            files['/proc/12/stat'] = '12 (nginx) ' + ' '.join(['S'] + ['0'] * 18 + ['101'])
+            self.assertFalse(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx', cache))
+
+    @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'Linux root executable replacement integration')
+    def test_real_nginx_master_keeps_logging_after_package_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.chmod(directory, 0o755)
+            executable = directory + '/nginx-fixture'
+            shutil.copyfile(sys.executable, executable)
+            os.chmod(executable, 0o755)
+            cfg = {'local_ips': [], 'log_dir': directory + '/logs', 'node': 'local',
+                   'nginx_socket_gid': 65534, 'nginx_executable': executable}
+            path = directory + '/nginx.sock'
+            collector = m.Collector(cfg)
+            receiver = threading.Thread(target=collector.nginx, args=(path,))
+            receiver.start()
+            sender = "import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM); s.sendto(b'qntw_http: {\"event\":\"http\",\"request\":\"GET / HTTP/1.1\"}',sys.argv[1])"
+            master_script = """import os,subprocess,sys
+def worker():
+ os.setgroups([]);os.setgid(65534);os.setuid(65534)
+for line in sys.stdin:
+ subprocess.run([sys.executable,'-c',sys.argv[1],sys.argv[2]],preexec_fn=worker,check=True)
+ print('sent',flush=True)
+"""
+            master = subprocess.Popen([executable, '-u', '-c', master_script, sender, path],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 3
+                while not collector.health.get('nginx_receiver') and time.monotonic() < deadline:
+                    time.sleep(.01)
+                def send():
+                    master.stdin.write('send\n'); master.stdin.flush()
+                    self.assertEqual(master.stdout.readline().strip(), 'sent')
+                    self.assertEqual(collector.events.get(timeout=3)['event'], 'http')
+                send()
+                shutil.copyfile(sys.executable, executable + '.new')
+                os.chmod(executable + '.new', 0o755)
+                os.replace(executable + '.new', executable)
+                send()
+                # A receiver restart loses its cache. The exact root-owned
+                # deleted executable must still establish the running master.
+                collector.stop.set(); receiver.join(timeout=3)
+                collector.stop.clear()
+                receiver = threading.Thread(target=collector.nginx, args=(path,))
+                receiver.start()
+                deadline = time.monotonic() + 3
+                while not collector.health.get('nginx_receiver') and time.monotonic() < deadline:
+                    time.sleep(.01)
+                send()
+                self.assertEqual(collector.counts['nginx_rejected'], 0)
+            finally:
+                master.terminate(); master.wait(timeout=3)
+                master.stdin.close(); master.stdout.close()
+                collector.stop.set(); receiver.join(timeout=3)
+                collector.ring.file.close(); collector.sender.close()
 
 
 if __name__ == '__main__':

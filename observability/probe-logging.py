@@ -86,13 +86,12 @@ def nginx_event(line):
     return result
 
 
-def nginx_sender_allowed(credentials, executable):
+def nginx_sender_allowed(credentials, executable, masters=None):
     """Authenticate the kernel supplied sender, including shared web UIDs."""
     pid, uid, _ = credentials
     if uid == 0:
         return True
     try:
-        expected = os.stat(executable)
         with open('/proc/%d/status' % pid) as source:
             status = dict(line.rstrip().split(':', 1) for line in source if ':' in line)
         if int(status['Uid'].split()[1]) != uid:
@@ -101,13 +100,34 @@ def nginx_sender_allowed(credentials, executable):
         master = os.stat('/proc/%d/exe' % parent)
         with open('/proc/%d/status' % parent) as source:
             parent_status = dict(line.rstrip().split(':', 1) for line in source if ':' in line)
-        identity = (expected.st_dev, expected.st_ino)
+        if (not stat.S_ISREG(master.st_mode) or master.st_uid != 0
+                or master.st_mode & 0o022 or int(parent_status['Uid'].split()[1]) != 0):
+            return False
+        with open('/proc/%d/stat' % parent) as source:
+            # The command name may contain spaces and parentheses.
+            started = int(source.read().rpartition(') ')[2].split()[19])
+        identity = (master.st_dev, master.st_ino)
+        key = (parent, started, *identity, os.path.abspath(executable))
+        if masters is not None and key in masters:
+            masters.move_to_end(key)
+            return True
+        expected = os.stat(executable)
+        installed = (expected.st_dev, expected.st_ino)
+        if not stat.S_ISREG(expected.st_mode) or expected.st_uid != 0 or expected.st_mode & 0o022:
+            return False
         # An arbitrary user can run the nginx binary with their own config.
         # Only workers of a root-owned nginx master supply enforcement input.
-        return (stat.S_ISREG(expected.st_mode) and expected.st_uid == 0
-                and not expected.st_mode & 0o022
-                and identity == (master.st_dev, master.st_ino)
-                and int(parent_status['Uid'].split()[1]) == 0)
+        if identity != installed:
+            # Package replacement unlinks the running executable. Its exact
+            # trusted path and root-owned inode still prove the old master.
+            running = os.readlink('/proc/%d/exe' % parent)
+            if running != os.path.realpath(executable) + ' (deleted)':
+                return False
+        if masters is not None:
+            masters[key] = True
+            if len(masters) > 256:
+                masters.popitem(last=False)
+        return True
     except (OSError, ValueError, KeyError, IndexError):
         return False
 
@@ -519,6 +539,7 @@ class Collector:
 
     def nginx(self, path='/run/vpnshop-probes/nginx.sock'):
         executable = self.cfg.get('nginx_executable', '/usr/sbin/nginx')
+        masters = collections.OrderedDict()
         while not self.stop.is_set():
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
             try:
@@ -540,7 +561,7 @@ class Collector:
                                        if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS
                                        and len(value) >= 12]
                         if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(credentials) != 1
-                                or not nginx_sender_allowed(credentials[0], executable)):
+                                or not nginx_sender_allowed(credentials[0], executable, masters)):
                             self.counts['nginx_rejected'] += 1
                             continue
                         self.emit(nginx_event(data.decode(errors='replace')))

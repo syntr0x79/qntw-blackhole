@@ -61,7 +61,11 @@ uses Linux `SCM_CREDENTIALS` and accepts root or a worker whose parent is a root
 nginx master running the trusted executable. The executable defaults to
 `/usr/sbin/nginx`; set `nginx_executable` for a custom installation. A process
 sharing the web worker UID cannot supply enforcement evidence solely by knowing
-the socket path. Rootless nginx masters require an operator-reviewed trusted
+the socket path. Proven root masters remain valid across an executable package
+replacement. Their PID, start time, executable inode and root ownership are
+rechecked, with a bounded cache of 256 identities. After a collector restart,
+an old master can be recognized through the exact trusted executable path
+marked deleted by the kernel. Rootless nginx masters require an operator-reviewed trusted
 forwarding arrangement. Sender identity, node and observation time cannot be
 overridden by fields inside an HTTP log object.
 
