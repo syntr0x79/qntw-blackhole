@@ -24,13 +24,14 @@ type savedWindow struct {
 	Last  int64         `json:"last"`
 }
 type savedState struct {
-	Version    int                    `json:"version"`
-	Node       string                 `json:"node"`
-	History    map[string]banHistory  `json:"history"`
-	Banned     map[string]int64       `json:"banned"`
-	Windows    map[string]savedWindow `json:"windows"`
-	Released   map[string]int64       `json:"released_at,omitempty"`
-	TLSSources map[string]int64       `json:"tls_sources,omitempty"`
+	Version         int                    `json:"version"`
+	Node            string                 `json:"node"`
+	History         map[string]banHistory  `json:"history"`
+	Banned          map[string]int64       `json:"banned"`
+	Windows         map[string]savedWindow `json:"windows"`
+	Released        map[string]int64       `json:"released_at,omitempty"`
+	PendingReleases map[string]int64       `json:"pending_releases,omitempty"`
+	TLSSources      map[string]int64       `json:"tls_sources,omitempty"`
 }
 
 func (e *engine) portReason(b *bucket, now int64) string {
@@ -298,6 +299,9 @@ func (e *engine) adoptKernelJSON(data []byte, now int64) error {
 				continue
 			}
 			ip = ip.Unmap()
+			if _, pending := e.PendingReleases[ip]; pending {
+				continue
+			}
 			if strings.HasPrefix(name, "tls_sources_") {
 				seenTLS[ip] = true
 				// Successful manual unban atomically removes this kernel entry.
@@ -409,7 +413,10 @@ func (e *engine) saveState() error {
 	if e.Dry || e.StatePath == "" || !e.Dirty {
 		return nil
 	}
-	s := savedState{Version: 3, Node: e.C.Node, History: map[string]banHistory{}, Banned: map[string]int64{}, Windows: map[string]savedWindow{}, Released: map[string]int64{}, TLSSources: map[string]int64{}}
+	s := savedState{Version: 3, Node: e.C.Node, History: map[string]banHistory{}, Banned: map[string]int64{}, Windows: map[string]savedWindow{}, Released: map[string]int64{}, TLSSources: map[string]int64{}, PendingReleases: map[string]int64{}}
+	for ip, at := range e.PendingReleases {
+		s.PendingReleases[ip.String()] = at
+	}
 	for ip, first := range e.TLSSources {
 		s.TLSSources[ip.String()] = first
 	}
@@ -450,6 +457,15 @@ func (e *engine) saveState() error {
 		return err
 	}
 	if err = os.Rename(e.StatePath+".tmp", e.StatePath); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(e.StatePath))
+	if err != nil {
+		return err
+	}
+	err = directory.Sync()
+	directory.Close()
+	if err != nil {
 		return err
 	}
 	e.Dirty = false
@@ -501,7 +517,7 @@ func (e *engine) loadState(now int64) error {
 		}
 	}
 	e.Dirty = s.Version != 3
-	if len(s.Released) > 65536 {
+	if len(s.Released) > 65536 || len(s.PendingReleases) > 65536 {
 		return fmt.Errorf("release history capacity")
 	}
 	for src, at := range s.Released {
@@ -512,6 +528,19 @@ func (e *engine) loadState(now int64) error {
 		if at > 0 && at <= now+5 {
 			e.Released[ip.Unmap()] = at
 		}
+	}
+	for src, at := range s.PendingReleases {
+		ip, err := netip.ParseAddr(src)
+		if err != nil || ip.Zone() != "" || at <= 0 || at > now+5 {
+			return fmt.Errorf("invalid pending release")
+		}
+		ip = ip.Unmap()
+		e.PendingReleases[ip] = at
+		if at > e.Released[ip] {
+			e.Released[ip] = at
+		}
+		delete(e.Banned, ip)
+		delete(e.History, ip)
 	}
 	for src, first := range s.TLSSources {
 		ip, err := netip.ParseAddr(src)
@@ -532,15 +561,54 @@ func (e *engine) loadState(now int64) error {
 		if !e.permittedSource(ip) || len(w.Ports) > 64 {
 			continue
 		}
-		b := &bucket{Ports: map[int]int64{}, Paths: map[string]int64{}, Fail: map[[32]byte]int64{}, Last: w.Last}
+		b := e.window(ip, false)
+		if w.Last > b.Last && w.Last <= now+5 {
+			b.Last = w.Last
+		}
 		for p, at := range w.Ports {
-			if p > 0 && p <= 65535 && !e.Listen[p] && at >= now-21600 && at <= now+5 {
-				b.Ports[p] = at
+			_, tracked := b.Ports[p]
+			if p > 0 && p <= 65535 && !e.Listen[p] && at >= now-21600 && at <= now+5 && (tracked || len(b.Ports) < 64) {
+				if at > b.Ports[p] {
+					b.Ports[p] = at
+				}
+				if at > b.Last {
+					b.Last = at
+				}
 			}
 		}
-		if len(b.Ports) > 0 {
-			e.B[ip] = b
+		if len(b.Ports) == 0 {
+			e.dropWindow(ip)
 		}
 	}
 	return nil
+}
+
+// Persist release intent before touching nftables. A failed removal or process
+// crash must be retried before kernel inventory can be adopted as a fresh ban.
+func (e *engine) releaseSource(ip netip.Addr, now int64, remove func(netip.Addr) error) error {
+	delete(e.Banned, ip)
+	delete(e.History, ip)
+	delete(e.TLSSources, ip)
+	e.dropWindow(ip)
+	e.Released[ip] = now
+	e.PendingReleases[ip] = now
+	e.Dirty = true
+	if err := e.saveState(); err != nil {
+		return err
+	}
+	return e.finishReleases(remove)
+}
+
+func (e *engine) finishReleases(remove func(netip.Addr) error) error {
+	if e.Dry || len(e.PendingReleases) == 0 {
+		return nil
+	}
+	for ip := range e.PendingReleases {
+		if err := remove(ip); err != nil {
+			return fmt.Errorf("pending source release: %w", err)
+		}
+		delete(e.PendingReleases, ip)
+	}
+	e.Dirty = true
+	return e.saveState()
 }

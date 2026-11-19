@@ -96,6 +96,13 @@ marker only after configuration, and then enable `vpnshop-tls-alert-gate.service
 Readiness is proven from the listener and owned routing state. Merely setting a
 configuration flag does not bypass DROP.
 
+The TLS exception is restricted to the ready gate's interface, public addresses
+and connection/packet marks. A different public alias or a connection already
+marked by another firewall rule keeps the source DROP policy. Readiness marker
+version 2 is required. When upgrading, update the routing and filter scripts
+together, then regenerate readiness using the gate service's normal activation
+sequence. A version 1 marker grants no TLS exception.
+
 All supplied edge examples protect IPv4 only. IPv6 support requires declaring
 every protected IPv6 address consistently in collector, blackhole and gate
 routing configuration, and enabling the corresponding listener/backend. Do not
@@ -140,11 +147,13 @@ evidence remains available in its separate summaries and journals.
 ## Preserved rules and limits
 
 * SYN sweeps count distinct unadvertised TCP ports: 8/60 seconds, 12/15 minutes,
-  or 32/6 hours. Retransmitted SYNs do not increase the port count.
+  or 32/6 hours. Retransmitted SYNs do not increase the port count. These series
+  are observations because a source address in a SYN can be forged. They do
+  not create permanent source bans by themselves.
 * HTTP classification requires two recognized sensitive paths; SSH requires
-  repeated relevant failures. Current HTTP expressions recognize root-level
-  `.env` and `.git`, but not nested paths such as `/admin/.env`. This known gap
-  is preserved in this extraction.
+  repeated relevant failures with validated source attribution. Sensitive HTTP
+  paths include nested `.env` and `.git` locations. Local nginx evidence must
+  pass Unix sender-credential checks before it reaches the blocking engine.
 * TLS classification uses six complete structural templates or capability
   variation grouped by IP and SNI: 4 profiles plus 3 version modes/60 seconds,
   6 profiles/15 seconds, or 8 profiles/60 seconds. GREASE, random values and
@@ -157,6 +166,9 @@ evidence remains available in its separate summaries and journals.
   connections can pass before a behavioral threshold is reached.
 * Opaque forwarding preserves original source IP/port and connection half-close.
   It does not decrypt TLS or introduce an ordinary-session lifetime limit.
+  After one direction closes, an inactive remaining direction expires after
+  60 seconds by default. Per-source active connection limits protect the shared
+  connection budget and can be adjusted for expected shared-address traffic.
 
 ## Evidence handling
 

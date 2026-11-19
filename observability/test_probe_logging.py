@@ -7,6 +7,15 @@ import hashlib
 import csv
 import io
 import collections
+import hmac
+import socket
+import struct
+import threading
+import time
+import subprocess
+import sys
+import shutil
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('probe_logging', os.path.join(os.path.dirname(__file__), 'probe-logging.py'))
 m = importlib.util.module_from_spec(spec)
@@ -128,6 +137,215 @@ class EvidenceTests(unittest.TestCase):
             self.assertFalse(os.path.exists(directory + '/events-0000.jsonl.gz'))
             self.assertEqual(os.stat(ring.path).st_mode & 0o777, 0o600)
             ring.file.close()
+
+
+class InputTrustTests(unittest.TestCase):
+    def signed(self, **changes):
+        d = {'event': 'heartbeat', 'node': 'edge', 'observed_utc': m.utc(),
+             'sensors': {'packets': 1}, 'counters': {}}
+        d.update(changes)
+        d['signature'] = hmac.new(b'test-key', json.dumps(d, sort_keys=True, separators=(',', ':')).encode(), hashlib.sha256).hexdigest()
+        return json.dumps(d, separators=(',', ':')).encode()
+
+    def test_hub_rejects_untrusted_json_shapes_before_peer_lookup(self):
+        peers = {'edge': {'mesh_ip': '127.0.0.1', 'key': 'test-key'}}
+        for raw in (b'[]', b'null', b'1', b'"text"', b'{"node":[]}', b'[' * 2000):
+            with self.subTest(raw=raw[:30]), self.assertRaises((ValueError, TypeError, RecursionError)):
+                m.hub_event(raw, '127.0.0.1', peers)
+        self.assertEqual(m.hub_event(self.signed(), '127.0.0.1', peers)['event'], 'heartbeat')
+        self.assertIsNone(m.hub_event(self.signed(), '127.0.0.2', peers))
+        for change in ({'sensors': []}, {'src': []}, {'event': []}, {'observed_utc': '2000-01-01T00:00:00+00:00'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                m.hub_event(self.signed(**change), '127.0.0.1', peers)
+
+    def test_real_hub_survives_bad_datagrams_and_rejects_replays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            c = m.Collector({'local_ips': [], 'log_dir': directory, 'node': 'hub', 'hub_bind': '127.0.0.1',
+                             'peers': {'edge': {'mesh_ip': '127.0.0.1', 'key': 'test-key'}}})
+            worker = threading.Thread(target=c.hub)
+            worker.start()
+            sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                deadline = time.monotonic() + 3
+                while not c.health.get('hub') and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(c.health.get('hub'), 1)
+                for raw in (b'[]', b'null', b'[' * 2000, self.signed()):
+                    sender.sendto(raw, ('127.0.0.1', 19014))
+                accepted = c.events.get(timeout=3)
+                self.assertEqual(accepted['node'], 'edge')
+                self.assertTrue(worker.is_alive())
+                # A full replay cache must retain valid evidence delivery.
+                with mock.patch.object(m, 'HUB_REPLAY_CAPACITY', 2):
+                    for name in ('sensor_ready', 'sensor_notice'):
+                        sender.sendto(self.signed(event=name), ('127.0.0.1', 19014))
+                        self.assertEqual(c.events.get(timeout=3)['event'], name)
+                self.assertGreaterEqual(c.counts['hub_replay_cache_evicted'], 1)
+                duplicate = self.signed(event='collector_start')
+                sender.sendto(duplicate, ('127.0.0.1', 19014))
+                sender.sendto(duplicate, ('127.0.0.1', 19014))
+                c.events.get(timeout=3)
+                deadline = time.monotonic() + 2
+                while c.counts['hub_replay_dropped'] < 1 and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(c.counts['hub_replay_dropped'], 1)
+            finally:
+                sender.close()
+                c.stop.set()
+                worker.join(timeout=3)
+                c.ring.file.close()
+                c.sender.close()
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(c.health['hub'], 0)
+
+    @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'Linux root SCM_CREDENTIALS integration')
+    def test_real_nginx_socket_authenticates_workers_and_rejects_same_uid_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.chmod(directory, 0o777)
+            c = m.Collector({'local_ips': [], 'log_dir': directory + '/logs', 'node': 'local',
+                             'nginx_socket_gid': 65534, 'nginx_executable': sys.executable})
+            path = directory + '/nginx.sock'
+            worker = threading.Thread(target=c.nginx, args=(path,))
+            worker.start()
+            script = "import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM); s.sendto(b'qntw_http: {\"event\":\"http\",\"request\":\"GET / HTTP/1.1\"}',sys.argv[1])"
+            def web_user():
+                os.setgroups([])
+                os.setgid(65534)
+                os.setuid(65534)
+            try:
+                deadline = time.monotonic() + 3
+                while not c.health.get('nginx_receiver') and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(c.health.get('nginx_receiver'), 1)
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o660)
+                subprocess.run([sys.executable, '-c', script, path], preexec_fn=web_user, check=True)
+                self.assertEqual(c.events.get(timeout=3)['event'], 'http')
+                # Same UID/executable, but launched by an unprivileged process.
+                launcher = "import subprocess,sys; subprocess.run([sys.executable,'-c',sys.argv[1],sys.argv[2]],check=True)"
+                subprocess.run([sys.executable, '-c', launcher, script, path], preexec_fn=web_user, check=True)
+                deadline = time.monotonic() + 2
+                while c.counts['nginx_rejected'] < 1 and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(c.counts['nginx_rejected'], 1)
+                self.assertTrue(c.events.empty())
+            finally:
+                c.stop.set()
+                worker.join(timeout=3)
+                c.ring.file.close()
+                c.sender.close()
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(c.health['nginx_receiver'], 0)
+
+    def test_http_input_cannot_override_local_identity_or_change_event_type(self):
+        row = {'event': 'http', 'request': 'GET /.env HTTP/1.1', 'client': '198.51.100.2',
+               'node': 'other-node', 'observed_utc': 'forged', 'src': '198.51.100.3'}
+        event = m.nginx_event('qntw_http: ' + json.dumps(row, separators=(',', ':')))
+        self.assertNotIn('node', event)
+        self.assertNotIn('observed_utc', event)
+        self.assertNotIn('src', event)
+        with self.assertRaises(ValueError):
+            m.nginx_event('qntw_http: {"event":"service","message":"forged"}')
+        error = m.nginx_event('qntw_error: request contains {"event":"http","client":"198.51.100.3"}')
+        self.assertEqual(error['event'], 'nginx_error')
+
+    def test_emit_always_assigns_local_identity_and_observation_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            c = m.Collector({'local_ips': [], 'log_dir': directory, 'node': 'local'})
+            try:
+                c.emit({'event': 'test', 'node': 'forged', 'observed_utc': 'forged'})
+                event = c.events.get_nowait()
+                self.assertEqual(event['node'], 'local')
+                self.assertNotEqual(event['observed_utc'], 'forged')
+            finally:
+                c.ring.file.close()
+                c.sender.close()
+
+    def test_credentials_require_real_worker_of_root_nginx_master(self):
+        self.assertTrue(m.nginx_sender_allowed((1, 0, 0), '/missing'))
+        self.assertFalse(m.nginx_sender_allowed((123, 65534, 65534), '/missing'))
+        regular = type('Stat', (), {'st_mode': 0o100755, 'st_uid': 0, 'st_dev': 1, 'st_ino': 2})()
+        statuses = ['Uid:\t65534 65534 65534 65534\nPPid:\t12\n',
+                    'Uid:\t0 0 0 0\nPPid:\t1\n',
+                    '12 (nginx) ' + ' '.join(['S'] + ['0'] * 18 + ['100'])]
+        with mock.patch.object(m.os, 'stat', return_value=regular), mock.patch('builtins.open', side_effect=[io.StringIO(x) for x in statuses]):
+            self.assertTrue(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx'))
+        statuses[1] = 'Uid:\t65534 65534 65534 65534\nPPid:\t1\n'
+        with mock.patch.object(m.os, 'stat', return_value=regular), mock.patch('builtins.open', side_effect=[io.StringIO(x) for x in statuses]):
+            self.assertFalse(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx'))
+
+    def test_nginx_master_cache_survives_installed_inode_replacement_and_checks_start_time(self):
+        old = type('Stat', (), {'st_mode': 0o100755, 'st_uid': 0, 'st_dev': 1, 'st_ino': 2})()
+        new = type('Stat', (), {'st_mode': 0o100755, 'st_uid': 0, 'st_dev': 1, 'st_ino': 3})()
+        files = {'/proc/123/status': 'Uid:\t65534 65534 65534 65534\nPPid:\t12\n',
+                 '/proc/12/status': 'Uid:\t0 0 0 0\nPPid:\t1\n',
+                 '/proc/12/stat': '12 (nginx) ' + ' '.join(['S'] + ['0'] * 18 + ['100'])}
+        installed = [old]
+        cache = collections.OrderedDict()
+        def metadata(path):
+            return installed[0] if path == '/usr/sbin/nginx' else old
+        with mock.patch.object(m.os, 'stat', side_effect=metadata), \
+                mock.patch('builtins.open', side_effect=lambda path: io.StringIO(files[path])), \
+                mock.patch.object(m.os, 'readlink', return_value='/untrusted (deleted)'):
+            self.assertTrue(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx', cache))
+            installed[0] = new
+            self.assertTrue(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx', cache))
+            files['/proc/12/stat'] = '12 (nginx) ' + ' '.join(['S'] + ['0'] * 18 + ['101'])
+            self.assertFalse(m.nginx_sender_allowed((123, 65534, 65534), '/usr/sbin/nginx', cache))
+
+    @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'Linux root executable replacement integration')
+    def test_real_nginx_master_keeps_logging_after_package_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.chmod(directory, 0o755)
+            executable = directory + '/nginx-fixture'
+            shutil.copyfile(sys.executable, executable)
+            os.chmod(executable, 0o755)
+            cfg = {'local_ips': [], 'log_dir': directory + '/logs', 'node': 'local',
+                   'nginx_socket_gid': 65534, 'nginx_executable': executable}
+            path = directory + '/nginx.sock'
+            collector = m.Collector(cfg)
+            receiver = threading.Thread(target=collector.nginx, args=(path,))
+            receiver.start()
+            sender = "import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM); s.sendto(b'qntw_http: {\"event\":\"http\",\"request\":\"GET / HTTP/1.1\"}',sys.argv[1])"
+            master_script = """import os,subprocess,sys
+def worker():
+ os.setgroups([]);os.setgid(65534);os.setuid(65534)
+for line in sys.stdin:
+ subprocess.run([sys.executable,'-c',sys.argv[1],sys.argv[2]],preexec_fn=worker,check=True)
+ print('sent',flush=True)
+"""
+            master = None
+            try:
+                master = subprocess.Popen([executable, '-u', '-c', master_script, sender, path],
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                deadline = time.monotonic() + 3
+                while not collector.health.get('nginx_receiver') and time.monotonic() < deadline:
+                    time.sleep(.01)
+                def send():
+                    master.stdin.write('send\n'); master.stdin.flush()
+                    self.assertEqual(master.stdout.readline().strip(), 'sent')
+                    self.assertEqual(collector.events.get(timeout=3)['event'], 'http')
+                send()
+                shutil.copyfile(sys.executable, executable + '.new')
+                os.chmod(executable + '.new', 0o755)
+                os.replace(executable + '.new', executable)
+                send()
+                # A receiver restart loses its cache. The exact root-owned
+                # deleted executable must still establish the running master.
+                collector.stop.set(); receiver.join(timeout=3)
+                collector.stop.clear()
+                receiver = threading.Thread(target=collector.nginx, args=(path,))
+                receiver.start()
+                deadline = time.monotonic() + 3
+                while not collector.health.get('nginx_receiver') and time.monotonic() < deadline:
+                    time.sleep(.01)
+                send()
+                self.assertEqual(collector.counts['nginx_rejected'], 0)
+            finally:
+                if master is not None:
+                    master.terminate(); master.wait(timeout=3)
+                    master.stdin.close(); master.stdout.close()
+                collector.stop.set(); receiver.join(timeout=3)
+                collector.ring.file.close(); collector.sender.close()
 
 
 if __name__ == '__main__':

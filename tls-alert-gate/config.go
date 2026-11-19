@@ -20,7 +20,9 @@ type config struct {
 	BackendMark          int      `json:"backend_mark"`
 	InspectTimeoutMS     int      `json:"inspect_timeout_ms"`
 	DialTimeoutMS        int      `json:"dial_timeout_ms"`
+	HalfCloseIdleMS      int      `json:"half_close_idle_timeout_ms"`
 	MaxConnections       int      `json:"max_connections"`
+	MaxConnectionsPerIP  int      `json:"max_connections_per_ip"`
 	MaxPending           int      `json:"max_pending"`
 	MaxPendingPerIP      int      `json:"max_pending_per_ip"`
 	MaxHelloBytes        int      `json:"max_hello_bytes"`
@@ -33,7 +35,7 @@ type config struct {
 }
 
 func defaults() config {
-	return config{ListenV4: "0.0.0.0:14443", ListenV6: "[::]:14443", BackendV4: "10.254.254.1:443", BackendV6: "[fd51:4e::1]:443", BackendMark: 0x514e02, InspectTimeoutMS: 3000, DialTimeoutMS: 3000, MaxConnections: 2048, MaxPending: 512, MaxPendingPerIP: 64, MaxHelloBytes: 16384, ExpectedOriginalPort: 443, ProfilesPath: "/etc/vpnshop-security/probe-blackhole/profiles.json", KnownSourcesPath: "/var/lib/vpnshop-tls-alert/known-sources.json", BlackholeStatePath: "/var/lib/vpnshop-probe-blackhole/state.json", SummaryPath: "/var/lib/vpnshop-tls-alert/summary.json"}
+	return config{ListenV4: "0.0.0.0:14443", ListenV6: "[::]:14443", BackendV4: "10.254.254.1:443", BackendV6: "[fd51:4e::1]:443", BackendMark: 0x514e02, InspectTimeoutMS: 3000, DialTimeoutMS: 3000, HalfCloseIdleMS: 60000, MaxConnections: 2048, MaxPending: 512, MaxPendingPerIP: 64, MaxHelloBytes: 16384, ExpectedOriginalPort: 443, ProfilesPath: "/etc/vpnshop-security/probe-blackhole/profiles.json", KnownSourcesPath: "/var/lib/vpnshop-tls-alert/known-sources.json", BlackholeStatePath: "/var/lib/vpnshop-probe-blackhole/state.json", SummaryPath: "/var/lib/vpnshop-tls-alert/summary.json"}
 }
 func readConfig(path string) (config, error) {
 	c := defaults()
@@ -50,6 +52,12 @@ func readConfig(path string) (config, error) {
 	return c, validateConfig(c)
 }
 func validateConfig(c config) error {
+	if c.MaxConnectionsPerIP < 0 || c.MaxConnectionsPerIP > c.MaxConnections {
+		return errors.New("per-IP connection limit must be zero (automatic) or within max_connections")
+	}
+	if c.HalfCloseIdleMS < 100 || c.HalfCloseIdleMS > 300000 {
+		return errors.New("half-close idle timeout must be between 100 and 300000 milliseconds")
+	}
 	if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`).MatchString(c.Node) || c.BackendMark <= 0 || c.MaxConnections < 1 || c.MaxConnections > 16384 || c.MaxHelloBytes < 5 || c.MaxHelloBytes > 16384 || c.InspectTimeoutMS < 100 || c.InspectTimeoutMS > 10000 || c.DialTimeoutMS < 100 || c.DialTimeoutMS > 10000 || c.ExpectedOriginalPort < 1 || c.ExpectedOriginalPort > 65535 || c.MaxPending < 1 || c.MaxPending > c.MaxConnections || c.MaxPendingPerIP < 1 || c.MaxPendingPerIP > c.MaxPending {
 		return errors.New("invalid gate bounds")
 	}
@@ -92,4 +100,11 @@ func validateConfig(c config) error {
 		}
 	}
 	return nil
+}
+
+func (c config) connectionLimitPerIP() int {
+	if c.MaxConnectionsPerIP > 0 {
+		return c.MaxConnectionsPerIP
+	}
+	return min(256, c.MaxConnections)
 }

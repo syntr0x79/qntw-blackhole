@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"container/list"
 	"crypto/sha256"
 	"encoding/json"
 	"flag"
@@ -13,7 +14,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,15 +38,19 @@ type event struct {
 	Dst     string `json:"dst"`
 	Port    string `json:"dport"`
 	Flags   string `json:"flags"`
+	Unit    string `json:"unit"`
 	Message string `json:"message"`
 	Request string `json:"request_line"`
 	URI     string `json:"uri"`
 }
 type bucket struct {
-	Ports       map[int]int64
-	Paths       map[string]int64
-	Fail        map[[32]byte]int64
-	Last, Proof int64
+	Ports      map[int]int64
+	Paths      map[string]int64
+	Fail       map[[32]byte]int64
+	Last       int64
+	Transport  bool
+	Order      *list.Element
+	ScanReason string
 }
 type engine struct {
 	C                                                        config
@@ -60,20 +64,25 @@ type engine struct {
 	Events, Bans, NFTErrors, ReadErrors, Rotations, Capacity uint64
 	History                                                  map[netip.Addr]banHistory
 	TLSSources                                               map[netip.Addr]int64
+	PendingReleases                                          map[netip.Addr]int64
 	StatePath                                                string
 	Dirty, PortReady                                         bool
 	LastGC                                                   int64
 	PersistenceErrors, PortConfigErrors                      uint64
 	TLSSourceErrors                                          uint64
+	SYNObservations, WindowEvictions                         uint64
+	SYNWindows, TransportWindows                             *list.List
 }
 
-var sourceRX = regexp.MustCompile(`(?:client: |\bfrom |\brhost=|Connection (?:closed|reset) by )(?:invalid user [^ ]+ )?([0-9a-fA-F:.]+)`)
-var sshRX = regexp.MustCompile(`(?i)(Failed password|Invalid user|authentication failure|Unable to negotiate|no matching (?:key exchange|host key)|Bad protocol version)`)
-var proofRX = regexp.MustCompile(`(?i)(SSL_do_handshake|Connection (?:closed|reset) by|Failed password|Invalid user|Accepted publickey|Unable to negotiate|Bad protocol version)`)
-var badPathRX = regexp.MustCompile(`(?i)(^/\.env(?:$|[/.])|^/\.git(?:$|/)|^/(?:wp-login\.php|wp-admin(?:$|/)|actuator(?:$|/)|server-status(?:$|/)|vendor/phpunit(?:$|/)|HNAP1(?:$|/)|boaform(?:$|/)|phpmyadmin(?:$|/)))`)
-
 func newEngine(c config, dry bool) *engine {
-	e := &engine{C: c, Trusted: map[netip.Addr]bool{}, Local: map[string]bool{}, Listen: map[int]bool{}, B: map[netip.Addr]*bucket{}, Banned: map[netip.Addr]int64{}, Released: map[netip.Addr]int64{}, History: map[netip.Addr]banHistory{}, TLSSources: map[netip.Addr]int64{}, PortReady: true, Dry: dry}
+	e := &engine{
+		C: c, Dry: dry, PortReady: true,
+		Trusted: map[netip.Addr]bool{}, Local: map[string]bool{}, Listen: map[int]bool{},
+		B: map[netip.Addr]*bucket{}, Banned: map[netip.Addr]int64{},
+		Released: map[netip.Addr]int64{}, PendingReleases: map[netip.Addr]int64{},
+		History: map[netip.Addr]banHistory{}, TLSSources: map[netip.Addr]int64{},
+		SYNWindows: list.New(), TransportWindows: list.New(),
+	}
 	for _, s := range append(c.Trusted, c.Local...) {
 		a, err := netip.ParseAddr(s)
 		if err != nil {
@@ -116,7 +125,7 @@ func (e *engine) ban(ip netip.Addr, now int64, reason string) {
 		e.PersistenceErrors++
 		fmt.Fprintf(os.Stderr, "state save failed: %v\n", err)
 	}
-	b, _ := json.Marshal(map[string]any{"at_utc": time.Unix(now, 0).UTC().Format(time.RFC3339), "ip": ip.String(), "reason": reason, "permanent": true, "expires_utc": nil, "duration_seconds": nil, "policy_version": 3, "dry_run": e.Dry})
+	b, _ := json.Marshal(map[string]any{"at_utc": time.Unix(now, 0).UTC().Format(time.RFC3339), "ip": ip.String(), "reason": reason, "permanent": true, "expires_utc": nil, "duration_seconds": nil, "policy_version": 4, "dry_run": e.Dry})
 	fmt.Println(string(b))
 }
 func (e *engine) consume(line []byte, now int64) {
@@ -137,16 +146,15 @@ func (e *engine) consume(line []byte, now int64) {
 		return
 	}
 	src := v.Src
-	if src == "" {
-		src = v.Client
-	}
-	if src == "" {
-		// Ignore quoted HTTP request data; use the final service source field.
-		message := strings.SplitN(v.Message, ", request:", 2)[0]
-		matches := sourceRX.FindAllStringSubmatch(message, -1)
-		if len(matches) > 0 {
-			src = strings.TrimRight(matches[len(matches)-1][1], ":")
+	sshFailure := false
+	if v.Event == "service" {
+		var ok bool
+		src, sshFailure, ok = sshSource(v.Unit, v.Message)
+		if !ok {
+			return
 		}
+	} else if src == "" {
+		src = v.Client
 	}
 	ip, err := netip.ParseAddr(src)
 	if err != nil {
@@ -162,7 +170,7 @@ func (e *engine) consume(line []byte, now int64) {
 	if v.Event == "tcp" && !e.Local[v.Dst] {
 		return
 	}
-	if v.Event != "tcp" && v.Event != "http" && v.Event != "service" && v.Event != "nginx_error" {
+	if v.Event != "tcp" && v.Event != "http" && v.Event != "service" {
 		return
 	}
 	e.Events++
@@ -176,14 +184,9 @@ func (e *engine) consume(line []byte, now int64) {
 			return
 		}
 	}
-	b := e.B[ip]
+	b := e.window(ip, v.Event != "tcp")
 	if b == nil {
-		if len(e.B) >= 5000 {
-			e.Capacity++
-			return
-		}
-		b = &bucket{Ports: map[int]int64{}, Paths: map[string]int64{}, Fail: map[[32]byte]int64{}}
-		e.B[ip] = b
+		return
 	}
 	if t > b.Last {
 		b.Last = t
@@ -212,24 +215,12 @@ func (e *engine) consume(line []byte, now int64) {
 			e.Dirty = true
 		}
 	case "http":
-		b.Proof = t
-		path := v.Request
-		if path == "" {
-			path = v.URI
-		}
-		fields := strings.Fields(path)
-		if len(fields) > 1 {
-			path = fields[1]
-		}
-		path = strings.SplitN(path, "?", 2)[0]
-		if len(path) <= 512 && badPathRX.MatchString(path) && len(b.Paths) < 8 {
+		path := sensitivePath(v.Request, v.URI)
+		if path != "" && len(b.Paths) < 8 {
 			b.Paths[path] = t
 		}
-	case "service", "nginx_error":
-		if proofRX.MatchString(v.Message) {
-			b.Proof = t
-		}
-		if v.Event == "service" && sshRX.MatchString(v.Message) && len(b.Fail) < 16 {
+	case "service":
+		if sshFailure && len(b.Fail) < 16 {
 			b.Fail[sha256.Sum256(append([]byte(v.At), []byte(v.Message)...))] = t
 		}
 	}
@@ -239,7 +230,15 @@ func (e *engine) consume(line []byte, now int64) {
 		e.ban(ip, now, "repeated_ssh_failures")
 	} else if e.PortReady {
 		if reason := e.portReason(b, now); reason != "" {
-			e.ban(ip, now, reason)
+			// Raw SYN source addresses have no return-path proof. A valid HTTP or
+			// SSH connection from this IP cannot authenticate separate SYN tuples.
+			// Retain the series as evidence without creating an IP-wide ban.
+			if reason != b.ScanReason {
+				b.ScanReason = reason
+				e.SYNObservations++
+				data, _ := json.Marshal(map[string]any{"event": "syn_sweep_observed", "at_utc": time.Unix(now, 0).UTC().Format(time.RFC3339), "ip": ip.String(), "reason": reason, "enforced": false})
+				fmt.Println(string(data))
+			}
 		}
 	}
 }
@@ -256,7 +255,7 @@ func (e *engine) gc(now int64) {
 			}
 		}
 		if b.Last < now-60 && len(b.Ports) == 0 {
-			delete(e.B, ip)
+			e.dropWindow(ip)
 			e.Dirty = true
 		}
 	}
@@ -267,7 +266,8 @@ func (e *engine) metrics(now int64) {
 	if e.PortReady {
 		ready = 1
 	}
-	s += fmt.Sprintf("qntw_probe_blackhole_policy_version 3\nqntw_probe_blackhole_port_policy_ready %d\nqntw_probe_blackhole_persistence_errors_total %d\nqntw_probe_blackhole_port_config_errors_total %d\nqntw_probe_blackhole_active_bans %d\n", ready, e.PersistenceErrors, e.PortConfigErrors, len(e.Banned))
+	s += fmt.Sprintf("qntw_probe_blackhole_policy_version 4\nqntw_probe_blackhole_port_policy_ready %d\nqntw_probe_blackhole_persistence_errors_total %d\nqntw_probe_blackhole_port_config_errors_total %d\nqntw_probe_blackhole_active_bans %d\n", ready, e.PersistenceErrors, e.PortConfigErrors, len(e.Banned))
+	s += fmt.Sprintf("qntw_probe_blackhole_syn_observations_total %d\nqntw_probe_blackhole_window_evictions_total %d\n", e.SYNObservations, e.WindowEvictions)
 	gate := 0
 	if e.C.TLSGateEnabled {
 		gate = 1
@@ -383,6 +383,9 @@ func main() {
 	if err := e.loadState(time.Now().Unix()); err != nil {
 		panic(err)
 	}
+	if err := e.finishReleases(removeBan); err != nil {
+		panic(err)
+	}
 	if *syncTLS {
 		// Like import/migration/unban, this explicit maintenance operation must
 		// run with the daemon stopped to avoid concurrent state replacement.
@@ -471,16 +474,7 @@ func main() {
 		if ip.Zone() != "" {
 			panic("zone identifiers are not supported")
 		}
-		delete(e.Banned, ip)
-		delete(e.History, ip)
-		delete(e.TLSSources, ip)
-		delete(e.B, ip)
-		e.Released[ip] = time.Now().Unix()
-		e.Dirty = true
-		if err = e.saveState(); err != nil {
-			panic(err)
-		}
-		if err = removeBan(ip); err != nil {
+		if err = e.releaseSource(ip, time.Now().Unix(), removeBan); err != nil {
 			panic(err)
 		}
 		fmt.Printf("removed %s\n", ip)

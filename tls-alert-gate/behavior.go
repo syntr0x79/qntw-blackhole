@@ -251,11 +251,23 @@ type decision struct {
 type detector struct {
 	mu        sync.Mutex
 	buckets   map[string]*behaviorBucket
+	perSource map[string]int
 	lastSweep int64
 	capacity  uint64
 }
 
-func newDetector() *detector { return &detector{buckets: map[string]*behaviorBucket{}} }
+func newDetector() *detector {
+	return &detector{buckets: map[string]*behaviorBucket{}, perSource: map[string]int{}}
+}
+
+// The caller holds d.mu, so the global and per-source inventories stay aligned.
+func (d *detector) removeBucket(key string, b *behaviorBucket) {
+	delete(d.buckets, key)
+	d.perSource[b.IP]--
+	if d.perSource[b.IP] == 0 {
+		delete(d.perSource, b.IP)
+	}
+}
 func (d *detector) observe(ip string, f feature, now int64) (decision, bool) {
 	addr, e := netip.ParseAddr(ip)
 	if e != nil || len(f.SNI) > 253 {
@@ -269,19 +281,20 @@ func (d *detector) observe(ip string, f feature, now int64) (decision, bool) {
 	if now > d.lastSweep {
 		for k, b := range d.buckets {
 			if b.Last < now-60 {
-				delete(d.buckets, k)
+				d.removeBucket(k, b)
 			}
 		}
 		d.lastSweep = now
 	}
 	b := d.buckets[key]
 	if b == nil {
-		if len(d.buckets) >= 4096 {
+		if len(d.buckets) >= 4096 || d.perSource[ip] >= 64 {
 			d.capacity++
 			return decision{}, false
 		}
 		b = &behaviorBucket{IP: ip, Profiles: map[string]observation{}}
 		d.buckets[key] = b
+		d.perSource[ip]++
 	}
 	if now < b.Last-60 {
 		return decision{}, false
@@ -331,7 +344,7 @@ func (d *detector) forget(ip string) {
 	defer d.mu.Unlock()
 	for key, bucket := range d.buckets {
 		if bucket.IP == ip {
-			delete(d.buckets, key)
+			d.removeBucket(key, bucket)
 		}
 	}
 }

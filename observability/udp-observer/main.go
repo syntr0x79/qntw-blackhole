@@ -18,7 +18,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +30,17 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
 )
+
+var captureDroppedPattern = regexp.MustCompile(`(?:^|[ ,])([0-9]+) packets dropped by kernel(?:$|[ ,])`)
+
+func captureDropped(line string) (uint64, bool) {
+	match := captureDroppedPattern.FindStringSubmatch(line)
+	if match == nil {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(match[1], 10, 64)
+	return value, err == nil
+}
 
 type peer struct {
 	MeshIP string `json:"mesh_ip"`
@@ -306,8 +319,8 @@ func (o *observer) capture(ctx context.Context) {
 			var prev uint64
 			for s.Scan() {
 				line := s.Text()
-				var n uint64
-				if _, e := fmt.Sscanf(line, "%d packets dropped by kernel", &n); e == nil && n >= prev {
+				n, ok := captureDropped(line)
+				if ok && n >= prev {
 					o.mu.Lock()
 					o.counts["capture_kernel_dropped"] += n - prev
 					o.mu.Unlock()

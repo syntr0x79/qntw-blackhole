@@ -186,6 +186,42 @@ func TestMetadataAndWireShareTheSameFingerprint(t *testing.T) {
 		t.Fatal("offline calibration differs from wire detector")
 	}
 }
+
+func TestRotatingSNICannotExhaustBehaviorCapacityForAnotherSource(t *testing.T) {
+	d := newDetector()
+	f := normalizedFeature("", baselineCaps())
+	for i := 0; i < 4100; i++ {
+		f.SNI = fmt.Sprintf("name%d.example", i)
+		d.observe("192.0.2.1", f, 1000)
+	}
+	n, capacity := d.status()
+	if n != 64 || capacity != 4036 || d.perSource["192.0.2.1"] != 64 {
+		t.Fatalf("per-source SNI inventory is unbounded: %d buckets, %d rejected", n, capacity)
+	}
+	for i := 0; i < 6; i++ {
+		c := baselineCaps()
+		c.Ciphers = append(c.Ciphers, 600+i)
+		_, hit := d.observe("192.0.2.2", normalizedFeature("other.example", c), 1000+int64(i))
+		if hit != (i == 5) {
+			t.Fatalf("another source lost behavior detection at profile %d", i)
+		}
+	}
+	d.forget("192.0.2.1")
+	if _, exists := d.perSource["192.0.2.1"]; exists {
+		t.Fatal("release retained the source's behavior capacity")
+	}
+	for i := 0; i < 64; i++ {
+		f.SNI = fmt.Sprintf("new%d.example", i)
+		d.observe("192.0.2.1", f, 1006)
+	}
+	if d.perSource["192.0.2.1"] != 64 {
+		t.Fatal("released behavior capacity could not be reused")
+	}
+	d.observe("192.0.2.3", f, 1067)
+	if len(d.perSource) != 1 || d.perSource["192.0.2.3"] != 1 || len(d.buckets) != 1 {
+		t.Fatal("expiration retained per-source behavior capacity")
+	}
+}
 func TestCalibrationNeverWritesStateOrLeaksOpaqueData(t *testing.T) {
 	var input strings.Builder
 	for i := 0; i < 6; i++ {

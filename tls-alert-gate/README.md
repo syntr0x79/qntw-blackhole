@@ -38,6 +38,36 @@ specific routing state. `control.sh` coordinates listener readiness and draining
 Their apply/start/remove operations change the local machine; do not run them to
 perform an offline check.
 
+After either relay direction reaches EOF, `half_close_idle_timeout_ms` bounds
+how long the remaining direction can sit without byte progress. The default is
+60000 ms, with allowed values from 100 to 300000 ms. Each successful read or
+write restarts that idle allowance, so an active response can continue beyond
+the configured duration after its request has half-closed. An I/O error closes
+both sockets promptly. Full-duplex sessions retain their existing lifetime.
+The summary exposes the setting and the `half_close_expired` counter.
+
+Relay copies account for progress in userspace instead of using TCP splice.
+Two 16 KiB copy buffers are allocated per forwarded connection. This is 64 MiB
+at 2048 relays or 128 MiB at 4096 relays, in addition to other process and socket
+memory. Capacity planning should include the memory and CPU cost of copying.
+
+`max_connections_per_ip` caps active connections for each untrusted source,
+including opaque forwarded streams after their initial inspection. Its default
+value of zero selects the lower of 256 and `max_connections`. An explicit value
+must fit within the global limit. Trusted sources share the global limit and
+are exempt from this additional per-source cap. The summary reports the effective
+limit and `source_capacity` rejections. Account for clients sharing a public
+address when selecting this limit.
+
+Behavioral analysis retains at most 64 SNI buckets per source and 4096 buckets
+globally. Expiration and manual source release return both allowances. Capacity
+rejections contribute to `behavior_capacity` in the summary, while existing
+buckets continue to accumulate their profiles.
+
+Failed known-source writes retain their in-memory decision and are retried on
+the five-second maintenance tick. The retry stops once the state is durable,
+allowing blackhole synchronization to catch up after storage recovers.
+
 `test-routing-netns.sh STAGE_DIR` and `test-alert-netns.sh STAGE_DIR` are existing isolated
 Linux fixtures. They require root, nftables, iproute2, util-linux, jq, Python 3,
 OpenSSL, and GNU coreutils. The alert stage includes the gate binary, routing

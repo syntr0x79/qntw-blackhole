@@ -20,7 +20,7 @@ import (
 )
 
 type counters struct {
-	Accepted, Active, Forwarded, Rejected, Capacity, DialErrors, InspectPartial, PersistenceErrors, ReleaseReadErrors, AlertWriteErrors, RejectedNonTLS, LogSuppressed, LogErrors, AcceptErrors atomic.Uint64
+	Accepted, Active, Forwarded, Rejected, Capacity, SourceCapacity, DialErrors, InspectPartial, PersistenceErrors, ReleaseReadErrors, AlertWriteErrors, RejectedNonTLS, LogSuppressed, LogErrors, AcceptErrors, HalfCloseExpired atomic.Uint64
 }
 type gate struct {
 	cfg          config
@@ -30,6 +30,8 @@ type gate struct {
 	behavior     *detector
 	counts       counters
 	slots        chan struct{}
+	activeMu     sync.Mutex
+	activePerIP  map[string]int
 	logMu        sync.Mutex
 	logSecond    int64
 	logCount     int
@@ -56,7 +58,7 @@ func newGate(c config) (*gate, error) {
 	if e != nil {
 		return nil, e
 	}
-	g := &gate{cfg: c, profiles: ps, known: known, behavior: newDetector(), trusted: map[string]bool{}, slots: make(chan struct{}, c.MaxConnections), pending: map[string]int{}}
+	g := &gate{cfg: c, profiles: ps, known: known, behavior: newDetector(), trusted: map[string]bool{}, slots: make(chan struct{}, c.MaxConnections), activePerIP: map[string]int{}, pending: map[string]int{}}
 	for _, s := range c.TrustedIPs {
 		a, _ := netip.ParseAddr(s)
 		g.trusted[a.Unmap().String()] = true
@@ -102,6 +104,34 @@ func (g *gate) endPending(ip string) {
 	if g.pending[ip] == 0 {
 		delete(g.pending, ip)
 	}
+}
+
+func (g *gate) beginConnection(ip string) bool {
+	g.activeMu.Lock()
+	defer g.activeMu.Unlock()
+	if !g.trusted[ip] && g.activePerIP[ip] >= g.cfg.connectionLimitPerIP() {
+		g.counts.SourceCapacity.Add(1)
+		return false
+	}
+	select {
+	case g.slots <- struct{}{}:
+		g.activePerIP[ip]++
+		g.counts.Active.Add(1)
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *gate) endConnection(ip string) {
+	g.activeMu.Lock()
+	defer g.activeMu.Unlock()
+	<-g.slots
+	g.activePerIP[ip]--
+	if g.activePerIP[ip] == 0 {
+		delete(g.activePerIP, ip)
+	}
+	g.counts.Active.Add(^uint64(0))
 }
 func endpoint(addr net.Addr) (string, int, error) {
 	a, ok := addr.(*net.TCPAddr)
@@ -155,9 +185,9 @@ func (g *gate) reject(conn *net.TCPConn, prefix []byte, src string, sport int, d
 	conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 	io.Copy(io.Discard, io.LimitReader(conn, 4096))
 }
-func (g *gate) handle(conn *net.TCPConn) {
+func (g *gate) handle(conn *net.TCPConn, source string) {
 	defer conn.Close()
-	defer func() { <-g.slots; g.counts.Active.Add(^uint64(0)) }()
+	defer g.endConnection(source)
 	src, sport, e := endpoint(conn.RemoteAddr())
 	if e != nil {
 		return
@@ -223,20 +253,16 @@ func (g *gate) handle(conn *net.TCPConn) {
 	if e = writeAll(upstream, prefix); e != nil {
 		return
 	}
-	// Direct TCPConn arguments preserve Linux splice where available. Half-close
-	// each direction; do not add a new idle or session lifetime for normal VPNs.
-	done := make(chan struct{}, 1)
-	go func() { io.Copy(upstream, conn); upstream.CloseWrite(); done <- struct{}{} }()
-	io.Copy(conn, upstream)
-	conn.CloseWrite()
-	<-done
+	if relayTCP(conn, upstream, time.Duration(g.cfg.HalfCloseIdleMS)*time.Millisecond) {
+		g.counts.HalfCloseExpired.Add(1)
+	}
 }
 func (g *gate) summary(ready, draining bool) map[string]any {
 	g.pendingMu.Lock()
 	pending := g.pendingTotal
 	g.pendingMu.Unlock()
 	behaviorBuckets, behaviorCapacity := g.behavior.status()
-	return map[string]any{"behavior_enabled": g.cfg.BehaviorEnabled, "behavior_buckets": behaviorBuckets, "behavior_capacity": behaviorCapacity, "schema": 1, "node": g.cfg.Node, "at_utc": time.Now().UTC().Format(time.RFC3339Nano), "ready": ready, "draining": draining, "known_sources": g.known.size(), "pending": pending, "listeners": len(g.listeners), "limits": map[string]any{"max_connections": g.cfg.MaxConnections, "max_pending": g.cfg.MaxPending, "max_pending_per_ip": g.cfg.MaxPendingPerIP, "max_hello_bytes": g.cfg.MaxHelloBytes, "inspect_timeout_ms": g.cfg.InspectTimeoutMS}, "counters": map[string]uint64{"accepted": g.counts.Accepted.Load(), "active": g.counts.Active.Load(), "forwarded": g.counts.Forwarded.Load(), "rejected": g.counts.Rejected.Load(), "capacity": g.counts.Capacity.Load(), "dial_errors": g.counts.DialErrors.Load(), "inspect_partial": g.counts.InspectPartial.Load(), "persistence_errors": g.counts.PersistenceErrors.Load(), "release_read_errors": g.counts.ReleaseReadErrors.Load(), "alert_write_errors": g.counts.AlertWriteErrors.Load(), "rejected_non_tls_known_source": g.counts.RejectedNonTLS.Load(), "log_suppressed": g.counts.LogSuppressed.Load(), "log_errors": g.counts.LogErrors.Load(), "accept_errors": g.counts.AcceptErrors.Load()}}
+	return map[string]any{"behavior_enabled": g.cfg.BehaviorEnabled, "behavior_buckets": behaviorBuckets, "behavior_capacity": behaviorCapacity, "schema": 1, "node": g.cfg.Node, "at_utc": time.Now().UTC().Format(time.RFC3339Nano), "ready": ready, "draining": draining, "known_sources": g.known.size(), "pending": pending, "listeners": len(g.listeners), "limits": map[string]any{"max_connections": g.cfg.MaxConnections, "max_connections_per_ip": g.cfg.connectionLimitPerIP(), "max_pending": g.cfg.MaxPending, "max_pending_per_ip": g.cfg.MaxPendingPerIP, "max_hello_bytes": g.cfg.MaxHelloBytes, "inspect_timeout_ms": g.cfg.InspectTimeoutMS, "half_close_idle_timeout_ms": g.cfg.HalfCloseIdleMS}, "counters": map[string]uint64{"accepted": g.counts.Accepted.Load(), "active": g.counts.Active.Load(), "forwarded": g.counts.Forwarded.Load(), "rejected": g.counts.Rejected.Load(), "capacity": g.counts.Capacity.Load(), "source_capacity": g.counts.SourceCapacity.Load(), "dial_errors": g.counts.DialErrors.Load(), "inspect_partial": g.counts.InspectPartial.Load(), "persistence_errors": g.counts.PersistenceErrors.Load(), "release_read_errors": g.counts.ReleaseReadErrors.Load(), "alert_write_errors": g.counts.AlertWriteErrors.Load(), "rejected_non_tls_known_source": g.counts.RejectedNonTLS.Load(), "log_suppressed": g.counts.LogSuppressed.Load(), "log_errors": g.counts.LogErrors.Load(), "accept_errors": g.counts.AcceptErrors.Load(), "half_close_expired": g.counts.HalfCloseExpired.Load()}}
 }
 func (g *gate) run(ctx context.Context) error {
 	if e := g.known.ensureFile(); e != nil {
@@ -292,14 +318,13 @@ func (g *gate) run(ctx context.Context) error {
 				}
 				backoff = 10 * time.Millisecond
 				g.counts.Accepted.Add(1)
-				select {
-				case g.slots <- struct{}{}:
-					g.counts.Active.Add(1)
-					go g.handle(c.(*net.TCPConn))
-				default:
+				source, _, endpointErr := endpoint(c.RemoteAddr())
+				if endpointErr != nil || !g.beginConnection(source) {
 					g.counts.Capacity.Add(1)
 					c.Close()
+					continue
 				}
+				go g.handle(c.(*net.TCPConn), source)
 			}
 		}(listener)
 	}
@@ -328,6 +353,9 @@ func (g *gate) run(ctx context.Context) error {
 		case <-tick.C:
 			if e := g.known.refreshReleased(); e != nil {
 				g.counts.ReleaseReadErrors.Add(1)
+			}
+			if e := g.known.retryPersistence(); e != nil {
+				g.counts.PersistenceErrors.Add(1)
 			}
 			for _, ip := range g.known.releaseChanges(seenReleases) {
 				g.behavior.forget(ip)

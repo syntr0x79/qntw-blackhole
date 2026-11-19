@@ -81,6 +81,33 @@ func TestPersistenceFailureRetainsInMemoryClassification(t *testing.T) {
 	if !m.contains("192.0.2.20") {
 		t.Fatal("disk failure would forward recognized scanner")
 	}
+	if !m.dirty || m.retryPersistence() == nil {
+		t.Fatal("failed state write lost its retry requirement")
+	}
+	if err := os.Remove(filepath.Dir(m.path)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.retryPersistence(); err != nil {
+		t.Fatalf("state did not persist after storage recovered: %v", err)
+	}
+	if m.dirty {
+		t.Fatal("successful retry retained dirty state")
+	}
+	loaded, err := loadSources("test", m.path, "")
+	if err != nil || !loaded.contains("192.0.2.20") {
+		t.Fatalf("classification did not survive recovered persistence: %v", err)
+	}
+	before, err := os.Stat(m.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.retryPersistence(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(m.path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("clean retry rewrote the state unnecessarily: %v", err)
+	}
 }
 func TestPendingBounds(t *testing.T) {
 	g := &gate{cfg: config{MaxPending: 2, MaxPendingPerIP: 1}, pending: map[string]int{}}

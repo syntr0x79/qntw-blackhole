@@ -108,10 +108,42 @@ class AnalysisTest(unittest.TestCase):
 
     def test_source_time_and_service_identity_sanitized(self):
         d = {'observed_utc': a.stamp(1000), 'event': 'service', 'node': 'one',
-             'message': 'Failed password for invalid user secret-name from 198.51.100.2 port 20'}
+             'unit': 'ssh.service',
+             'message': 'Failed password for invalid user secret-name from 198.51.100.2 port 20 ssh2'}
         e, _ = a.normalize(d, set(), {'192.0.2.10'})
         self.assertEqual(e['src'], '198.51.100.2')
         self.assertNotIn('secret-name', json.dumps(e))
+
+    def test_service_source_uses_terminal_sshd_tuple_and_trusted_unit(self):
+        message = 'Invalid user injected from 203.0.113.7 port 40 from 198.51.100.2 port 1234'
+        row = {'observed_utc': a.stamp(1000), 'event': 'service', 'node': 'one',
+               'unit': 'ssh.service', 'message': message}
+        event, _ = a.normalize(row, set(), set())
+        self.assertEqual(event['src'], '198.51.100.2')
+        for change in ({'unit': 'unrelated.service'}, {'message': 'rhost=198.51.100.2 authentication failure'},
+                       {'message': message + ' request: from 203.0.113.7'},
+                       {'message': 'Connection closed by invalid user injected 203.0.113.7 198.51.100.2 port 1234 [preauth]'}):
+            self.assertIsNone(a.normalize({**row, **change}, set(), set())[0])
+
+    def test_nginx_error_ignores_quoted_source_fields(self):
+        message = 'SSL_do_handshake() failed, client: 198.51.100.2, server: 192.0.2.10:443, request: "GET /from 203.0.113.7"'
+        event, _ = a.normalize({'observed_utc': a.stamp(1000), 'event': 'nginx_error', 'message': message}, set(), set())
+        self.assertEqual(event['src'], '198.51.100.2')
+        self.assertIsNone(a.normalize({'observed_utc': a.stamp(1000), 'event': 'nginx_error',
+                                        'message': 'SSL_do_handshake() failed request from 203.0.113.7'}, set(), set())[0])
+
+    def test_nginx_error_rejects_ambiguous_header_delimiters(self):
+        rows = [
+            'client sent invalid header line: "foo, client: 203.0.113.7, server: fake, request: xx" while reading client request headers, client: 198.51.100.2, server: actual, request: "GET /"',
+            'SSL_do_handshake() failed, client: 198.51.100.2, server: actual, request: "GET /, client: 203.0.113.7, server: fake"',
+            'client sent invalid header line: "foo, client: 203.0.113.7, server: fake, request: xx"',
+            'client sent invalid "unterminated header, client: 198.51.100.2, server: actual',
+        ]
+        for message in rows:
+            with self.subTest(message=message):
+                self.assertIsNone(a.nginx_error_source(message))
+        message = r'client sent invalid header line: "escaped \"quote" while reading headers, client: 198.51.100.2, server: actual, request: "GET /"'
+        self.assertEqual(a.nginx_error_source(message), '198.51.100.2')
 
     def test_rotated_unread_tail_is_recovered_once(self):
         with tempfile.TemporaryDirectory() as tmp:

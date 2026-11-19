@@ -7,6 +7,5 @@ vulnerability reporting when available for sensitive details.
 
 This repository contains defensive source classification and observation tools.
 Treat runtime evidence and configurations as private. Shared-address false
-positives, bounded capture, and the current nested HTTP-path limitation are
-documented in the README. Reproducing a defect should use the disposable test
+positives and bounded capture are documented in the README. Reproducing a defect should use the disposable test
 namespaces rather than a live firewall or VPN host.

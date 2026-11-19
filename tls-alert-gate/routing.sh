@@ -161,7 +161,9 @@ if [[ "$mode" == check || "$mode" == apply ]];then
  nft -f "$tmp"
  mkdir -p "$(dirname "$ready")";chmod 700 "$(dirname "$ready")"
  ticks=$(sed 's/.*) //' "/proc/$pid/stat" |awk '{print $20}')
- jq -n --arg node "$node" --argjson pid "$pid" --argjson ticks "$ticks" --argjson port "$port" '{version:1,node:$node,pid:$pid,procstart_ticks:$ticks,listener_port:$port,routing_table:"qntw_tls_gate"}' > "$ready.tmp"
+ jq -n --arg node "$node" --argjson pid "$pid" --argjson ticks "$ticks" --argjson port "$port" \
+  --arg iface "$iface" --arg mark "$ig" --argjson ips "$(jq -c '.local_ips' "$cfg")" \
+  '{version:2,node:$node,pid:$pid,procstart_ticks:$ticks,listener_port:$port,routing_table:"qntw_tls_gate",interface:$iface,ingress_mark:$mark,local_ips:$ips}' > "$ready.tmp"
  chmod 600 "$ready.tmp";mv "$ready.tmp" "$ready"
  write_state active
  echo 'routing active'
@@ -175,7 +177,12 @@ render 0 > "$tmp";nft -c -f "$tmp";nft -f "$tmp";write_state draining
 if [[ "$mode" == disable-new ]];then echo 'new diversion disabled; existing marked flows retained';exit;fi
 command -v conntrack >/dev/null
 for mark in "$ig" "$bg";do
- if conntrack -L -p tcp --mark "$mark" -o extended 2>/dev/null |grep -Eq '\b(ESTABLISHED|SYN_SENT|SYN_RECV|FIN_WAIT|CLOSE_WAIT|LAST_ACK)\b';then
+ # Capture the complete listing and its status. A failed dump cannot prove
+ # that streams have drained, and grep -q can SIGPIPE a successful dump.
+ if ! connections=$(conntrack -L -p tcp --mark "$mark" -o extended);then
+  echo 'cannot verify drained connections; retained routing' >&2;exit 1
+ fi
+ if grep -Eq '\b(ESTABLISHED|SYN_SENT|SYN_RECV|FIN_WAIT|CLOSE_WAIT|LAST_ACK)\b' <<< "$connections";then
   echo 'active marked connections remain; retained draining routing' >&2;exit 1
  fi
 done
